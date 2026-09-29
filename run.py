@@ -1,12 +1,15 @@
 """Main entry point for the advanced intelligence gathering system."""
 import os
 import argparse
+import json
+from copy import copy
 from typing import Optional
 
 from trackers.investment import InvestmentTracker
 from core.orchestrator import Orchestrator
 from core.email_service import EmailConfig
 from config.settings import Config
+from core.search_service import SearchService, SEARCH_BACKEND_NAMES
 
 
 # Reports stay within the project unless an output directory is supplied.
@@ -148,7 +151,8 @@ def run_tracker(
     max_workers: Optional[int] = None,
     send_email: bool = False,
     email_addr: Optional[str] = None,
-    email_password: Optional[str] = None
+    email_password: Optional[str] = None,
+    config: Optional[Config] = None
 ) -> str:
     """
     Run a specific tracker.
@@ -190,7 +194,10 @@ def run_tracker(
             smtp_port=Config.EMAIL_SMTP_PORT
         )
 
-    tracker = tracker_class(market='china' if tracker_type == 'investment_china' else 'global')
+    options = {'market': 'china' if tracker_type == 'investment_china' else 'global'}
+    if config is not None:
+        options['config'] = config
+    tracker = tracker_class(**options)
     orchestrator = Orchestrator(tracker)
 
     # Run pipeline
@@ -239,11 +246,42 @@ def main():
         '--email-password',
         help='Email password/authorization code'
     )
+    parser.add_argument('--doctor', action='store_true', help='Show local readiness without network calls or key values')
+    parser.add_argument('--max-queries', type=int, help='Maximum queries per topic (1–50)')
+    parser.add_argument('--max-results', type=int, help='Maximum results per query (1–20)')
+    parser.add_argument('--timelimit', choices=['d', 'w', 'm', 'y', 'none'], help='News date window')
+    parser.add_argument('--search-backends', nargs='+', choices=SEARCH_BACKEND_NAMES,
+                        help='Override search priority; gdelt is an optional free news index')
+    parser.add_argument('--no-cache', action='store_true', help='Bypass all search caches')
+    parser.add_argument('--cache-path', help='Optional SQLite search cache shared between runs')
+    parser.add_argument('--sec-holdings', action='store_true', help='Read verified SEC 13F XML holdings and a prior snapshot')
 
     args = parser.parse_args()
 
     if args.max_workers is not None and args.max_workers < 1:
         parser.error('--max-workers must be positive')
+    for name, upper in [('max_queries', 50), ('max_results', 20)]:
+        value = getattr(args, name)
+        if value is not None and not 1 <= value <= upper:
+            parser.error(f'--{name.replace("_", "-")} must be between 1 and {upper}')
+    config = Config()
+    if args.max_queries is not None:
+        config.MAX_QUERIES = args.max_queries
+    if args.max_results is not None:
+        config.MAX_RESULTS = args.max_results
+    if args.timelimit is not None:
+        config.NEWS_TIMELIMIT = None if args.timelimit == 'none' else args.timelimit
+    if args.search_backends:
+        config.SEARCH_BACKENDS = list(dict.fromkeys(args.search_backends))
+    if args.no_cache:
+        config.ENABLE_SEARCH_CACHE = False
+    if args.cache_path:
+        config.SEARCH_CACHE_PATH = args.cache_path
+    if args.sec_holdings:
+        config.SEC_INCLUDE_HOLDINGS = True
+    if args.doctor:
+        show_readiness(config)
+        return
 
     if args.tracker == 'all':
         failed = False
@@ -260,7 +298,8 @@ def main():
                     max_workers=args.max_workers,
                     send_email=bool(args.email),
                     email_addr=args.email,
-                    email_password=args.email_password
+                    email_password=args.email_password,
+                    config=config
                 )
             except Exception as e:
                 failed = True
@@ -276,8 +315,40 @@ def main():
             max_workers=args.max_workers,
             send_email=bool(args.email),
             email_addr=args.email,
-            email_password=args.email_password
+            email_password=args.email_password,
+            config=config
         )
+
+
+def show_readiness(config):
+    """Print presence/readiness only; this does not test remote credentials."""
+    from core import search_service
+    try:
+        import weasyprint  # noqa: F401
+        pdf_ready = True
+    except (ImportError, OSError):
+        pdf_ready = False
+    probe_config = copy(config)
+    probe_config.ENABLE_SEARCH_CACHE = False
+    search = SearchService(probe_config)
+    enabled = search._enabled_backends()
+    if search_service.DDGS is None:
+        enabled = [name for name in enabled if not name.startswith('ddgs')]
+    print(json.dumps({
+        'network_checked': False,
+        'model': config.DEEPSEEK.model,
+        'model_key_present': bool(config.DEEPSEEK.api_key),
+        'search_priority': config.SEARCH_BACKENDS,
+        'locally_available_backends': enabled,
+        'sec_user_agent_present': bool(config.SEC_USER_AGENT),
+        'sec_holdings_enabled': config.SEC_INCLUDE_HOLDINGS,
+        'pdf_runtime_ready': pdf_ready,
+        'cache_enabled': config.ENABLE_SEARCH_CACHE,
+        'disk_cache_configured': bool(config.SEARCH_CACHE_PATH),
+        'max_queries': config.MAX_QUERIES,
+        'max_results': config.MAX_RESULTS,
+        'news_timelimit': config.NEWS_TIMELIMIT,
+    }, ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':

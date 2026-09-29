@@ -14,7 +14,7 @@ class LLMService:
 
         Args:
             llm_config: LLM configuration
-            extra_body: Optional extra body parameters (for Kimi thinking config)
+            extra_body: Optional provider-specific request parameters
         """
         self.client = llm_config.create_client() if llm_config.api_key else None
         self.model = llm_config.model

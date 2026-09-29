@@ -283,6 +283,29 @@ def test_context_limit_preserves_complete_records(config):
     assert text.count('摘要:') == 1
 
 
+def test_oversized_first_evidence_does_not_hide_later_fitting_records(config):
+    config.MAX_RAW_DATA_CHARS = 300
+    first = dict(item(title='Large report'), body='x' * 4000)
+    second = dict(item(url='https://reuters.com/short', title='Short capital event'), body='USD 10 million')
+    text = SearchAggregator(SearchService(config))._format_results([first, second], True)
+    assert 'Short capital event' in text and 'Large report' not in text
+    assert len(text) <= 300
+
+
+def test_future_publication_dates_are_discarded_even_without_window(config):
+    service = SearchService(config)
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    records = [item(date=tomorrow), item(url='https://reuters.com/unknown', title='Undated event')]
+    assert [r['href'] for r in service._process_results(records)] == ['https://reuters.com/unknown']
+
+
+def test_aware_publication_timestamps_use_local_calendar_date():
+    from datetime import datetime
+    from core.search_service import published_date
+    stamp = '2026-09-28T23:30:00-12:00'
+    assert published_date(stamp) == datetime.fromisoformat(stamp).astimezone().date()
+
+
 def test_known_stale_results_do_not_block_fallback(config):
     config.SEARCH_BACKENDS = ['ddgs', 'brave']
     config.BRAVE_API_KEY = 'fake'
@@ -330,6 +353,8 @@ def test_serper_ignores_malformed_individual_entries(monkeypatch, config):
     config.SERPER_API_KEY = 'fake'
     response = Mock()
     response.json.return_value = {'organic': [None, {'link': 'https://example.com/missing-title'},
+                                             {'title': 'Bad URL', 'link': 123},
+                                             {'title': 'Bad URL', 'link': {'url': 'https://example.com'}},
                                              {'title': 'Capital', 'link': 'https://reuters.com/a'}]}
     monkeypatch.setattr('core.search_service.requests.post', Mock(return_value=response))
     assert len(SearchService(config)._try_serper('q', 5, 'w')) == 1
@@ -421,6 +446,17 @@ def test_same_disclosure_preserves_complementary_query_excerpts(config):
     assert first['body'] == 'Capital deployed USD 10 million'
 
 
+def test_combined_disclosure_still_deduplicates_an_equivalent_story_from_another_url(config):
+    service = SearchService(config)
+    first = item()
+    second = {**first, 'body': 'Debt financing USD 20 million'}
+    combined = service._process_results([first, second])[0]
+    other_source = {**combined, 'href': 'https://reuters.com/equivalent-story'}
+    result = service._process_results([first, second, other_source])
+    assert len(result) == 1
+    assert 'USD 10 million' in result[0]['body'] and 'USD 20 million' in result[0]['body']
+
+
 def test_concurrent_backend_requests_are_spaced(config):
     import time
     config.SEARCH_MIN_INTERVALS = {'brave': 0.02}
@@ -434,6 +470,27 @@ def test_concurrent_backend_requests_are_spaced(config):
         list(pool.map(lambda _: service._run_backend('brave', 'q', 3, 'w'), range(4)))
     assert len(started) == 4
     assert all(b - a >= 0.018 for a, b in zip(sorted(started), sorted(started)[1:]))
+
+
+def test_slow_brave_responses_can_overlap_without_bypassing_start_spacing(config, monkeypatch):
+    import time
+    from threading import Barrier, Lock
+    from core.search_service import SearchRequestGate
+    config.SEARCH_MIN_INTERVALS = {'brave': 1}
+    monkeypatch.setattr('core.search_service._SEARCH_REQUEST_GATE', SearchRequestGate())
+    service = SearchService(config)
+    barrier, lock, started = Barrier(2), Lock(), []
+    def backend(*args):
+        with lock:
+            started.append(time.monotonic())
+        # A response may still be in flight when the next allowed request begins.
+        barrier.wait(timeout=4)
+        return []
+    service._try_brave = backend
+    with ThreadPoolExecutor(2) as pool:
+        results = list(pool.map(lambda _: service._run_backend('brave', 'q', 3, 'w'), range(2)))
+    assert results == [[], []] and len(started) == 2
+    assert sorted(started)[1] - sorted(started)[0] >= 0.99
 
 
 def test_ddgs_confirmed_empty_is_not_reported_as_outage(monkeypatch, config):

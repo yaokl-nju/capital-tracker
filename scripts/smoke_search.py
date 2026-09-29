@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.settings import Config
+from config.fund_mappings import get_search_names
 from core.search_service import SearchService
 
 
@@ -13,18 +14,21 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--query', default='institutional investment financing capital flows')
     parser.add_argument('--market', choices=('global', 'china'), default='global')
+    parser.add_argument('--institution', help='Require visible evidence for this institution or its aliases')
     args = parser.parse_args()
     config = Config()
     if args.market == 'china':
         config.SEARCH_REGION, config.SEARCH_GL, config.SEARCH_HL = 'cn-zh', 'CN', 'zh-Hans'
     service = SearchService(config)
-    results = service.search(args.query, max_results=3, timelimit='w')
+    options = {'required_names': get_search_names(args.institution)} if args.institution else {}
+    results = service.search(args.query, max_results=3, timelimit='w', **options)
     if results is None:
         print('FAIL: all configured search backends unavailable')
         return 1
     print(f'OK: {len(results)} results; locale={config.SEARCH_GL}')
     for result in results:
-        print(f"  {result['_domain']} score={result['_score']} dated={bool(result['date'])}")
+        print(f"  {result['_domain']} backend={result.get('_backend', 'unknown')} "
+              f"score={result['_score']} dated={bool(result['date'])}")
     return 0
 
 

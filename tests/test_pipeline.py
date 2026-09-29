@@ -48,6 +48,10 @@ def test_domestic_queries_cover_chinese_aliases_and_flows():
     assert any('易方达' in q and '融资' in q for q in queries)
     assert any('cninfo.com.cn' in q for q in queries)
     assert any('fundraising' in q for q in queries)
+    prompt = InvestmentQueryGenerator('china').get_prompt('Springs Capital')
+    assert '淡水泉' in prompt and '每个维度的第一条必须使用中文机构名称' in prompt
+    assert '基金官网、交易所公告及定期报告' in prompt
+    assert '每个维度的第一条必须使用中文机构名称' not in InvestmentQueryGenerator().get_prompt('Springs Capital')
 
 
 def test_no_summary_is_not_claimed_as_no_events(tracker):
@@ -187,6 +191,12 @@ def test_unsearched_citation_is_marked_without_discarding_analysis(tracker):
     assert 'https://invented.example' not in summary
     tracker.llm.complete.return_value = 'Capital event [source](https://reuters.com/verified)'
     assert tracker.summarize('Fund', raw) == tracker.llm.complete.return_value
+
+
+def test_inline_code_source_citation_becomes_a_clickable_link(tracker):
+    tracker.llm.complete.return_value = 'Capital event `[来源](https://reuters.com/verified)`'
+    raw = '链接: https://reuters.com/verified\n摘要: test event'
+    assert tracker.summarize('Fund', raw) == 'Capital event [来源](https://reuters.com/verified)'
 
 
 def test_all_failed_topics_are_not_reported_as_success(tmp_path):

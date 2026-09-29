@@ -41,6 +41,7 @@ class Config:
 	#   tavily - agent-native search API (needs TAVILY_API_KEY)
 	#   brave  - Brave Search API (needs BRAVE_API_KEY)
 	#   parallel - Parallel Search API (needs PARALLEL_SEARCH_API_KEY)
+	#   gdelt - optional keyless news index (explicit opt-in; service limits apply)
 	# A backend whose API key is empty is skipped automatically.
 	SEARCH_BACKENDS = ["ddgs_news", "brave", "parallel", "serper", "tavily", "ddgs_text"]
 
@@ -79,6 +80,8 @@ class Config:
 	MAX_RAW_DATA_CHARS = 40000
 	SEC_LOOKBACK_DAYS = 120
 	SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "")
+	SEC_INCLUDE_HOLDINGS = False  # opt in with --sec-holdings; extra official XML requests
+	SEC_MAX_POSITIONS = 10
 	SEARCH_DELAY_RANGE = (1, 1)
 	MIN_ANALYSIS_ITEMS = 5
 	# Separate process-wide gates cap general search and SEC at 10 starts/s and 10 in flight each.
@@ -95,6 +98,7 @@ class Config:
 	# Search cache (memory cache for repeated queries)
 	ENABLE_SEARCH_CACHE = True
 	SEARCH_CACHE_TTL = 3600  # seconds (1 hour)
+	SEARCH_CACHE_PATH = os.getenv('SEARCH_CACHE_PATH', '')  # optional SQLite cache
 
 	# Pre-configured LLM backends
 	DEEPSEEK = LLMConfig(

@@ -124,6 +124,22 @@ FUND_CIKS = {
     'Blackstone': '0001393818',
     'Blackstone Capital': '0001393818',
     'Blackstone Inc.': '0001393818',
+    # Each identifier is verified against the SEC filing index, not inferred from a brand.
+    # https://www.sec.gov/Archives/edgar/data/1135730/000091957426005478/0000919574-26-005478-index.htm
+    'Coatue Management': '0001135730',
+    'Coatue Management LLC': '0001135730',
+    # https://www.sec.gov/Archives/edgar/data/1103804/000110380426000004/0001103804-26-000004-index.html
+    'Viking Global Investors': '0001103804',
+    'Viking Global Investors LP': '0001103804',
+    # https://www.sec.gov/Archives/edgar/data/1061165/000091957426005485/0000919574-26-005485-index.html
+    'Lone Pine Capital': '0001061165',
+    'Lone Pine Capital LLC': '0001061165',
+    # https://www.sec.gov/Archives/edgar/data/1602189/000119312526225175/0001193125-26-225175-index.htm
+    'Dragoneer Investment Group': '0001602189',
+    'Dragoneer Investment Group, LLC': '0001602189',
+    # https://www.sec.gov/Archives/edgar/data/1762304/000091957426005568/0000919574-26-005568-index.htm
+    'HHLR Advisors': '0001762304',
+    'HHLR Advisors, Ltd.': '0001762304',
 }
 
 

@@ -128,7 +128,7 @@ def test_sec_and_web_overlap_with_one_shared_merge():
     cfg = config()
     service = SearchService(cfg)
     barrier = Barrier(2)
-    def web(*args):
+    def web(*args, **kwargs):
         barrier.wait(timeout=2)
         return [evidence(0)]
     def sec(*args, **kwargs):
@@ -225,8 +225,16 @@ def test_defaults_single_attempt_delay_and_ddgs_priorities():
     assert cfg.MAX_TRIALS == 1 and cfg.SEARCH_DELAY_RANGE == (1, 1)
     assert cfg.SEARCH_BACKENDS == ['ddgs_news', 'brave', 'parallel', 'serper', 'tavily', 'ddgs_text']
     assert cfg.SEARCH_CONCURRENCY <= 10
-    from core.search_service import _SEARCH_REQUEST_GATE
+    from core.search_service import _SEARCH_REQUEST_GATE, _SEC_REQUEST_GATE
     assert _SEARCH_REQUEST_GATE.limit == 10
+    assert _SEC_REQUEST_GATE.limit == 10
+    assert _SEARCH_REQUEST_GATE is not _SEC_REQUEST_GATE
+
+
+@pytest.mark.parametrize('limit', [0, -1, 1.5, '10'])
+def test_invalid_request_limits_fail_before_blocking(limit):
+    with pytest.raises(ValueError, match='positive integer'):
+        SearchRequestGate(limit)
 
 
 def test_sec_and_general_independent_ten_request_pools(monkeypatch):

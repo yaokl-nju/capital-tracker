@@ -8,6 +8,7 @@ from .tracker import Tracker
 from .report_generator import ReportGenerator
 from .email_service import EmailConfig, EmailService
 from config.settings import Config
+from .artifacts import save_report_artifacts
 
 
 class Orchestrator:
@@ -69,7 +70,7 @@ class Orchestrator:
                         _, summary = await asyncio.to_thread(self.tracker.process_topic, topic)
                     return topic, summary
                 except Exception as exc:
-                    return topic, f"处理失败: {exc}"
+                    return topic, f"处理失败: {type(exc).__name__}"
 
         return dict(await asyncio.gather(*(process(topic) for topic in topics)))
 
@@ -107,6 +108,11 @@ class Orchestrator:
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
         filename = f"{filename_prefix}_{timestamp}.pdf"
         output_path = os.path.join(output_dir, filename)
+
+        # Preserve analysis and evidence even when PDF rendering fails.
+        snapshot = getattr(self.tracker, 'snapshot_records', None)
+        records = snapshot() if snapshot is not None else {}
+        save_report_artifacts(output_path, report_title, summaries, records, self.config)
 
         # Generate PDF
         gen = ReportGenerator(output_path, topic=report_title, config=self.config)
@@ -149,7 +155,13 @@ class Orchestrator:
         """
         summaries = self.run_topics(topics, max_workers)
         if all(summary.startswith(("数据处理失败:", "处理失败:")) for summary in summaries.values()):
-            raise RuntimeError("全部主题检索或处理失败，未生成成功简报")
+            os.makedirs(output_dir, exist_ok=True)
+            stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+            path = os.path.join(output_dir, f'{filename_prefix}_{stamp}_failed.pdf')
+            snapshot = getattr(self.tracker, 'snapshot_records', None)
+            archive = save_report_artifacts(path, report_title, summaries,
+                                            snapshot() if snapshot else {}, self.config)
+            raise RuntimeError(f"全部主题检索或处理失败，未生成成功简报；诊断已保存: {archive}")
         return self.generate_report(
             summaries, output_dir, filename_prefix, report_title,
             send_email, email_config, recipient_email

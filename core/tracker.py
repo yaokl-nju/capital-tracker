@@ -6,6 +6,9 @@ import time
 import asyncio
 from itertools import zip_longest
 import re
+from threading import RLock
+from copy import deepcopy
+from datetime import datetime, timezone
 
 from core.llm_service import LLMService
 from core.search_service import SearchAggregator, canonical_url
@@ -68,6 +71,25 @@ class Tracker:
         self.query_generator = query_generator
         self.summarizer = summarizer
         self.config = config or Config()
+        self.topic_records = {}
+        self._records_lock = RLock()
+
+    def snapshot_records(self):
+        with self._records_lock:
+            return deepcopy(self.topic_records)
+
+    def _record_topic(self, topic, queries, raw_data, summary, started, error_type=''):
+        status = ('error' if error_type else 'no_evidence' if not raw_data else
+                  'evidence_only' if summary.startswith('### 自动分析不可用') else 'analyzed')
+        with self._records_lock:
+            self.topic_records[topic] = {
+                'completed_at': datetime.now(timezone.utc).isoformat(),
+                'duration_seconds': round(time.monotonic() - started, 3),
+                'status': status,
+                'error_type': error_type,
+                'queries': list(queries),
+                'raw_evidence': raw_data,
+            }
 
     def generate_queries(self, topic: str) -> List[str]:
         """
@@ -154,6 +176,8 @@ class Tracker:
 
         if not result or not result.strip():
             return self._evidence_fallback(raw_data)
+        # Models sometimes wrap a source citation in inline code, breaking PDF links.
+        result = re.sub(r'`(\[[^\]\n]*\]\(https?://[^\s)]+\))`', r'\1', result)
         allowed = {canonical_url(url) for url in re.findall(r'^链接: (https?://[^\s]+)', raw_data, re.M)}
         cited = re.findall(r'\[[^\]]*\]\(([^\s]+)\)', result)
         invalid = {url for url in cited if not canonical_url(url) or canonical_url(url) not in allowed}
@@ -180,23 +204,38 @@ class Tracker:
         Returns:
             Tuple of (topic, summary)
         """
+        started = time.monotonic()
+        queries, raw_data, summary, error_type = [], '', '', ''
         try:
             queries = self.generate_queries(topic)
             raw_data = self.perform_search(topic, queries)
             summary = self.summarize(topic, raw_data)
             return topic, summary
         except Exception as e:
-            return topic, f"数据处理失败: {e}"
+            error_type = type(e).__name__
+            summary = f"数据处理失败: {error_type}"
+            return topic, summary
+        finally:
+            self._record_topic(topic, queries, raw_data, summary, started, error_type)
     async def perform_search_async(self, topic: str, queries: List[str]) -> str:
         return await self.search_aggregator.aggregate_async(
             queries, timelimit=self.config.NEWS_TIMELIMIT)
 
     async def process_topic_async(self, topic: str) -> tuple[str, str]:
         """Overlap blocking SDK calls without changing their existing implementations."""
+        started = time.monotonic()
+        queries, raw_data, summary, error_type = [], '', '', ''
         try:
             queries = await asyncio.to_thread(self.generate_queries, topic)
             raw_data = await self.perform_search_async(topic, queries)
             summary = await asyncio.to_thread(self.summarize, topic, raw_data)
             return topic, summary
+        except asyncio.CancelledError:
+            error_type = 'CancelledError'
+            raise
         except Exception as exc:
-            return topic, f"数据处理失败: {exc}"
+            error_type = type(exc).__name__
+            summary = f"数据处理失败: {error_type}"
+            return topic, summary
+        finally:
+            self._record_topic(topic, queries, raw_data, summary, started, error_type)

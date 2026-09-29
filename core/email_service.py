@@ -84,7 +84,7 @@ class EmailService:
             msg.attach(part)
 
         except Exception as e:
-            print(f"❌ 读取附件失败: {e}")
+            print(f"❌ 读取附件失败: {type(e).__name__}")
             return False
 
         # Send email
@@ -96,5 +96,5 @@ class EmailService:
             return True
 
         except Exception as e:
-            print(f"❌ 邮件发送失败: {e}")
+            print(f"❌ 邮件发送失败: {type(e).__name__}")
             return False

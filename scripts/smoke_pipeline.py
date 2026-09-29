@@ -24,11 +24,9 @@ def main():
     tracker = InvestmentTracker(config, market=args.market)
     started = time.monotonic()
     orchestrator = Orchestrator(tracker)
-    summaries = orchestrator.run_topics([args.topic], max_workers=1)
-    output = orchestrator.generate_report(
-        summaries, args.output_dir, 'Capital_Smoke_' + args.market,
-        '金融资本链路验证')
-    Path(output).with_suffix('.md').write_text(summaries[args.topic], encoding='utf-8')
+    output = orchestrator.run(
+        [args.topic], args.output_dir, 'Capital_Smoke_' + args.market,
+        '金融资本链路验证', max_workers=1)
     print('Pipeline seconds:', round(time.monotonic() - started, 2))
     if not Path(output).is_file():
         return 1

@@ -176,6 +176,30 @@ class ReportGenerator:
         # The report needs hyperlinks, never remote images, CSS or local files.
         raise ValueError(f"报告不加载外部资源: {urlparse(url).scheme}")
 
+    @staticmethod
+    def _normalize_list_indent(text):
+        """Accept common model list indentation without changing code or 4-space lists."""
+        lines, fence, parent = [], None, False
+        for line in text.splitlines(keepends=True):
+            marker = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', line)
+            if marker:
+                if fence is None:
+                    fence = marker[1]
+                    parent = False
+                elif marker[1][0] == fence[0] and len(marker[1]) >= len(fence) and not marker[2].strip():
+                    fence = None
+                lines.append(line)
+                continue
+            if fence is None:
+                if re.match(r'^(?:[-*+] |\d+\. )', line):
+                    parent = True
+                elif line.strip() and not line.startswith((' ', '\t')):
+                    parent = False
+                if parent:
+                    line = re.sub(r'^ {2,3}(?=[-*+] |\d+\. )', '    ', line)
+            lines.append(line)
+        return ''.join(lines)
+
     def create_pdf(self, data: Dict[str, str]):
         """
         Generate PDF from markdown content.
@@ -199,7 +223,8 @@ class ReportGenerator:
             html_parts.append('<section>')
             html_parts.append(f'<div class="topic-section">■ {escape(topic)}</div>')
             # LLM/news HTML is data, not report layout or a resource directive.
-            safe_markdown = re.sub(r"<[^>]*>", lambda match: escape(match.group(0)), md_text)
+            safe_markdown = re.sub(r"<[^>]*>", lambda match: escape(match.group(0)),
+                                   self._normalize_list_indent(md_text))
             raw_html = md.convert(safe_markdown)
             raw_html = re.sub(r'href="([^"]*)"', self._safe_href, raw_html)
             raw_html = re.sub(r"<td>(.*?)</td>", self._format_table_dates, raw_html, flags=re.S)

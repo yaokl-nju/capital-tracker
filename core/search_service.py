@@ -1,7 +1,7 @@
 """Financial search, evidence processing, independent limits and SEC disclosures."""
 import time
 import asyncio
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import re
 from copy import deepcopy
 from threading import RLock, BoundedSemaphore
@@ -17,15 +17,21 @@ try:
 except ImportError:
     DDGS = None
 import requests
+import sqlite3
 
 from config.settings import Config
-from config.fund_mappings import get_sec_edgar_name, get_sec_cik
+from config.fund_mappings import get_sec_edgar_name, get_sec_cik, get_search_names
+from core.sec_holdings import enrich_filings
+from core.search_cache import SQLiteCache, cache_identity
+from core.search_policy import mentions_topic
 
 
 class SearchRequestGate:
     """Limit one request pool to 10 starts/second and 10 in flight."""
 
     def __init__(self, limit=10):
+        if not isinstance(limit, int) or limit < 1:
+            raise ValueError('Request limit must be a positive integer')
         self.limit = limit
         self.slots = BoundedSemaphore(limit)
         self.lock = RLock()
@@ -49,6 +55,13 @@ class SearchRequestGate:
 # All general-search backends share one pool; SEC has an independent pool.
 _SEARCH_REQUEST_GATE = SearchRequestGate()
 _SEC_REQUEST_GATE = SearchRequestGate()
+# Optional GDELT also needs process-wide spacing across tracker instances.
+_GDELT_LOCK = RLock()
+_GDELT_LAST_REQUEST = {}
+_COOLDOWN_LOCK = RLock()
+_BRAVE_COOLDOWNS = {}
+SEARCH_BACKEND_NAMES = ('ddgs_news', 'brave', 'parallel', 'serper', 'tavily',
+                        'gdelt', 'ddgs_text', 'ddgs')
 
 
 # Simple in-memory cache with TTL
@@ -107,11 +120,13 @@ def published_date(value: str):
         return None
     text = value.strip()
     try:
-        return datetime.fromisoformat(text.replace('Z', '+00:00')).date()
+        stamp = datetime.fromisoformat(text.replace('Z', '+00:00'))
+        return (stamp.astimezone() if stamp.tzinfo else stamp).date()
     except ValueError:
         pass
     try:
-        return parsedate_to_datetime(text).date()
+        stamp = parsedate_to_datetime(text)
+        return (stamp.astimezone() if stamp.tzinfo else stamp).date()
     except (ValueError, TypeError, OverflowError):
         pass
     for date_format in ('%b %d, %Y', '%B %d, %Y', '%Y年%m月%d日', '%Y/%m/%d'):
@@ -170,7 +185,7 @@ def canonical_url(url: str) -> str:
                   if not k.lower().startswith('utm_') and k.lower() not in ('fbclid', 'gclid')]
         return urlunparse((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path or '/',
                            parsed.params, urlencode(sorted(params)), ''))
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError):
         return ''
 
 
@@ -202,18 +217,24 @@ class SearchService:
     def __init__(self, config: Config = None):
         """Initialize search service."""
         self.config = config or Config()
-        self._backend_locks = {name: RLock() for name in ("ddgs", "ddgs_news", "ddgs_text", "serper", "brave", "parallel", "tavily")}
+        self._backend_locks = {name: RLock() for name in SEARCH_BACKEND_NAMES}
         self._backend_last_request = {}
         self.cache = SimpleCache(
             max_size=500,
             ttl=self.config.SEARCH_CACHE_TTL if self.config.ENABLE_SEARCH_CACHE else 0
         )
+        if self.config.ENABLE_SEARCH_CACHE and self.config.SEARCH_CACHE_PATH:
+            try:
+                self.cache = SQLiteCache(self.config.SEARCH_CACHE_PATH, ttl=self.config.SEARCH_CACHE_TTL)
+            except (sqlite3.Error, OSError, ValueError) as exc:
+                print(f' ⚠️ 磁盘搜索缓存初始化失败，使用内存缓存: {type(exc).__name__}')
 
     def search(
         self,
         query: str,
         max_results: int = 10,
-        timelimit: str = 'w'
+        timelimit: str = 'w',
+        *, required_names=None
     ) -> Optional[List[Dict[str, Any]]]:
         """Search across configurable backends with automatic fallback."""
         query = query.strip() if isinstance(query, str) else ''
@@ -221,12 +242,19 @@ class SearchService:
             return []
         if timelimit not in (None, '', 'd', 'w', 'm', 'y'):
             raise ValueError('Unsupported search time limit')
+        names = tuple(dict.fromkeys(name.strip() for name in (required_names or [])
+                                   if isinstance(name, str) and name.strip()))
+        cache_query = cache_identity(self.config, query, names)
         # Check cache first
         if self.config.ENABLE_SEARCH_CACHE:
-            cached = self.cache.get(query, timelimit, max_results)
+            cached = self.cache.get(cache_query, timelimit, max_results)
             if cached:
-                print(f"  [缓存命中] {query[:30]}...")
-                return cached
+                cached = self._process_results(cached)
+                if names:
+                    cached = [item for item in cached if self._mentions_topic(item, names)]
+                if cached:
+                    print(f"  [缓存命中] {query[:30]}...")
+                    return cached
 
         completed = False
         for backend in self._enabled_backends():
@@ -235,17 +263,23 @@ class SearchService:
                 completed = True
             if results:
                 results = self._process_results(results)
+                if names:
+                    results = [item for item in results if self._mentions_topic(item, names)]
                 if timelimit:
                     days = {'d': 1, 'w': 7, 'm': 31, 'y': 366}[timelimit]
                     cutoff = (datetime.now() - timedelta(days=days)).date()
                     results = [r for r in results if (date := published_date(r['date'])) is None or date >= cutoff]
                 results = results[:max_results]
                 if results:
+                    for item in results:
+                        item['_backend'] = backend
                     if self.config.ENABLE_SEARCH_CACHE:
-                        self.cache.set(query, timelimit, results, max_results)
+                        self.cache.set(cache_query, timelimit, results, max_results)
                     return results
 
         return [] if completed else None
+
+    _mentions_topic = staticmethod(mentions_topic)
 
     def _run_backend(
         self,
@@ -261,15 +295,30 @@ class SearchService:
             return None
         try:
             interval = getattr(self.config, 'SEARCH_MIN_INTERVALS', {}).get(backend, 0)
+            lock, starts = self._backend_locks[backend], self._backend_last_request
+            if backend == 'gdelt':
+                interval, lock, starts = max(5, interval), _GDELT_LOCK, _GDELT_LAST_REQUEST
             # Keep spacing tied to the actual request start, including gate waits.
             if interval > 0:
-                with self._backend_locks[backend]:
-                    previous = self._backend_last_request.get(backend)
-                    while previous is not None and time.monotonic() - previous < interval:
-                        time.sleep(1)
-                    with _SEARCH_REQUEST_GATE.request():
-                        self._backend_last_request[backend] = time.monotonic()
-                        return method(query, max_results, timelimit)
+                with ExitStack() as gate:
+                    with lock:
+                        if backend == 'gdelt' and starts.get('blocked_until', 0) > time.monotonic():
+                            print(' ⚠️ GDELT 限流冷却中，继续其他搜索后端')
+                            return None
+                        previous = starts.get(backend)
+                        while previous is not None and time.monotonic() - previous < interval:
+                            time.sleep(1)
+                        if backend == 'brave' and self._brave_cooling_down():
+                            return None
+                        gate.enter_context(_SEARCH_REQUEST_GATE.request())
+                        starts[backend] = time.monotonic()
+                        if backend == 'gdelt':
+                            # Finish a limited optional request before observing its cooldown.
+                            return method(query, max_results, timelimit)
+                    # Spacing constrains starts, not the duration of slow responses.
+                    return method(query, max_results, timelimit)
+            if backend == 'brave' and self._brave_cooling_down():
+                return None
             with _SEARCH_REQUEST_GATE.request():
                 return method(query, max_results, timelimit)
         except Exception as exc:
@@ -314,6 +363,7 @@ class SearchService:
         """Deduplicate search results by URL and title similarity."""
         seen_urls = {}
         deduplicated = []
+        features = {}
 
         for result in results:
             url, title = result['href'], result['title']
@@ -328,15 +378,18 @@ class SearchService:
                     else:
                         extra = f"\n补充检索摘要（来源日期：{result.get('date') or '未提供'}）：\n{body}"
                         previous['body'] = (current_body + extra)[:4000]
+                    features[url] = (features[url][0], self._financial_fingerprint(previous['body']))
                 continue
 
             # Check title similarity
             is_duplicate = False
+            current_date = published_date(result.get('date', ''))
+            current_fingerprint = self._financial_fingerprint(result.get('body', ''))
             for previous in deduplicated:
-                current_date, previous_date = published_date(result.get('date', '')), published_date(previous.get('date', ''))
+                previous_date, previous_fingerprint = features[previous['href']]
                 if current_date and previous_date and current_date != previous_date:
                     continue
-                if self._financial_fingerprint(result.get('body', '')) != self._financial_fingerprint(previous.get('body', '')):
+                if current_fingerprint != previous_fingerprint:
                     continue
                 if self._same_story(title, previous['title'], similarity_threshold):
                     is_duplicate = True
@@ -347,6 +400,7 @@ class SearchService:
 
             # This result is unique
             seen_urls[url] = result
+            features[url] = (current_date, current_fingerprint)
             deduplicated.append(result)
 
         return deduplicated
@@ -379,8 +433,52 @@ class SearchService:
             return data
         except Exception as exc:
             status = getattr(getattr(exc, 'response', None), 'status_code', '未知')
+            if backend == 'Brave' and status == 429:
+                seconds = self._brave_reset_seconds(exc.response.headers)
+                with _COOLDOWN_LOCK:
+                    key = self.config.BRAVE_API_KEY
+                    _BRAVE_COOLDOWNS[key] = max(_BRAVE_COOLDOWNS.get(key, 0), time.monotonic() + seconds)
+            if backend == 'GDELT' and status == 429:
+                response = exc.response
+                retry_after = response.headers.get('Retry-After', '')
+                try:
+                    seconds = float(retry_after)
+                    if not 0 < seconds <= 3600:
+                        seconds = 60
+                except (TypeError, ValueError):
+                    seconds = 60
+                with _GDELT_LOCK:
+                    _GDELT_LAST_REQUEST['blocked_until'] = time.monotonic() + seconds
             print(f' ⚠️ {backend} 单次搜索失败: {type(exc).__name__}（HTTP {status}）')
             return None
+
+    def _brave_cooling_down(self):
+        with _COOLDOWN_LOCK:
+            blocked_until = _BRAVE_COOLDOWNS.get(self.config.BRAVE_API_KEY, 0)
+        if blocked_until > time.monotonic():
+            print(' ⚠️ Brave 限流冷却中，继续其他搜索后端')
+            return True
+        return False
+
+    @staticmethod
+    def _brave_reset_seconds(headers):
+        """Honor only exhausted quota windows; never mistake a monthly reset for an RPS reset."""
+        remaining = str(headers.get('X-RateLimit-Remaining', '')).split(',')
+        resets = str(headers.get('X-RateLimit-Reset', '')).split(',')
+        try:
+            if len(remaining) == len(resets):
+                waits = [float(reset) for left, reset in zip(remaining, resets) if float(left) == 0]
+                if waits and all(0 <= wait <= 32 * 86400 for wait in waits):
+                    return max(1, max(waits))
+        except (TypeError, ValueError):
+            pass
+        try:
+            retry = float(headers.get('Retry-After', ''))
+            if 0 < retry <= 32 * 86400:
+                return retry
+        except (TypeError, ValueError):
+            pass
+        return 60
 
     def _map_results(self, items, url='url', body='body', date='date'):
         """Map provider fields into the common evidence schema."""
@@ -410,6 +508,31 @@ class SearchService:
     def _try_ddgs(self, query, max_results, timelimit):
         """Keep the previous backend name as a text-search alias."""
         return self._try_ddgs_text(query, max_results, timelimit)
+
+    def _try_gdelt(self, query, max_results, timelimit):
+        """Keyless news discovery; observation timestamps are not publication dates."""
+        params = {'query': query, 'mode': 'artlist', 'format': 'json',
+                  'maxrecords': min(max_results, 250), 'sort': 'datedesc',
+                  'timespan': {'d': '1day', 'w': '1week', 'm': '1month'}.get(timelimit, '3months')}
+        data = self._request_json('GDELT', 'get', 'https://api.gdeltproject.org/api/v2/doc/doc', params=params)
+        if data is None:
+            return None
+        articles = data.get('articles')
+        if articles is None and not data:
+            return []
+        if not isinstance(articles, list):
+            return None
+        records = []
+        for item in articles:
+            if not isinstance(item, dict):
+                continue
+            seen = item.get('seendate')
+            seen = seen if isinstance(seen, str) and re.fullmatch(r'\d{8}T\d{6}Z', seen) else '未提供'
+            records.append({'title': item.get('title'), 'href': item.get('url'), 'date': '',
+                            'body': f'GDELT 新闻索引，仅标题，未读取正文。索引观测时间：{seen}；'
+                                    '观测时间不作为已核实的发布日期或事件发生日期。',
+                            'source': get_domain(item.get('url') or ''), '_backend': 'gdelt'})
+        return self._process_results(records)
 
     def _search_ddgs(self, query, max_results, timelimit, surface, backend):
         """One DDGS surface/engine per attempt, sharing locale, proxy and filtering."""
@@ -522,6 +645,10 @@ class SearchService:
             title = result.get('title')
             if not url or not isinstance(title, str) or not title.strip():
                 continue
+            record_date = str(result.get('date') or '')
+            parsed = published_date(record_date)
+            if parsed is not None and parsed > datetime.now().date():
+                continue
             domain = get_domain(url)
             score = calculate_source_score(result.get('source', ''), domain,
                                            self.config.SOURCE_ALLOWLIST, self.config.SOURCE_DENYLIST)
@@ -530,7 +657,7 @@ class SearchService:
             item = dict(result)
             item.update(href=url, title=title.strip()[:512],
                         body=str(result.get('body') or result.get('description') or ''),
-                        source=str(result.get('source') or domain), date=str(result.get('date') or ''),
+                        source=str(result.get('source') or domain), date=record_date,
                         _domain=domain, _score=score)
             normalized.append(item)
         normalized.sort(key=lambda item: item['_score'], reverse=True)
@@ -609,7 +736,7 @@ class SecEdgarSearcher:
             allowed = {self._normalize_form(t) for t in filing_types}
             allowed |= {t + '/A' for t in list(allowed) if not t.endswith('/A')}
             periods = recent.get('reportDate', [])
-            results = []
+            results, history = [], []
             for index, (form, date_text, accession, document) in enumerate(zip(*fields)):
                 if not all(isinstance(value, str) for value in (form, date_text, accession, document)):
                     continue
@@ -619,27 +746,44 @@ class SecEdgarSearcher:
                     filed = datetime.strptime(date_text, '%Y-%m-%d').date()
                 except ValueError:
                     continue
-                if not cutoff <= filed <= today or not re.fullmatch(r'\d{10}-\d{2}-\d{6}', accession):
+                if filed > today or not re.fullmatch(r'\d{10}-\d{2}-\d{6}', accession):
                     continue
                 if not document or document.startswith('/') or '..' in document.split('/'):
                     continue
                 url = f'https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession.replace("-", "")}/{quote(document, safe="/._-")}'
                 period = periods[index] if isinstance(periods, list) and index < len(periods) else ''
+                period = period if isinstance(period, str) else ''
                 notice = '13F-NT 是通知文件，不是持仓明细。' if form.startswith('13F-NT') else ''
-                results.append({
+                item = {
                     'title': f'{data.get("name", cik)} — {form} Filing — {date_text}',
                     'href': url, 'source': 'SEC.gov', 'date': date_text, '_score': 1.0,
                     '_filing_type': form,
+                    '_report_period': period,
                     'body': f'SEC {form} 申报元数据；注册主体 {data.get("name", cik)}，CIK {cik}；'
                             f'申报日期 {date_text}，报告期 {period or "未提供"}。{notice}'
                             '不含持仓明细。13F 是季度末快照，不代表实时交易；'
                             '没有持仓表和前后期对照，不能确认具体持仓或新建仓、增减持。',
-                })
+                }
+                history.append(item)
+                if filed >= cutoff:
+                    results.append(item)
             results.sort(key=lambda item: item['date'], reverse=True)
-            return results[:max_results]
+            if self.config.SEC_INCLUDE_HOLDINGS:
+                holdings = [item for item in results if item['_filing_type'] in ('13F-HR', '13F-HR/A')
+                            and published_date(item.get('_report_period', ''))]
+                if holdings:
+                    latest = max(holdings, key=lambda item: (item['_report_period'], item['date']))
+                    results = [latest] + [item for item in results if item is not latest]
+            results = results[:max_results]
+            if self.config.SEC_INCLUDE_HOLDINGS:
+                self._enrich_holdings(results, history, cik)
+            return results
         except Exception as exc:
             print(f' ⚠️ SEC submissions API 单次查询失败: {type(exc).__name__}')
             return []
+
+    def _enrich_holdings(self, results, history, cik):
+        enrich_filings(self._get, results, history, cik, self.config.SEC_MAX_POSITIONS)
 
     def search_recent_filings(self, company_name, filing_types=None, max_results=10, days_back=None):
         if not company_name.strip() or max_results <= 0:
@@ -726,7 +870,7 @@ class SearchAggregator:
                                                 min_score, initial_results))
 
     async def aggregate_async(self, queries, max_results=None, timelimit='w', delay_range=None,
-                              min_score=0.3, initial_results=None, return_records=False):
+                              min_score=0.3, initial_results=None, return_records=False, required_names=None):
         config = self.search_service.config
         max_results = config.MAX_RESULTS if max_results is None else max_results
         delay_range = config.SEARCH_DELAY_RANGE if delay_range is None else delay_range
@@ -739,7 +883,8 @@ class SearchAggregator:
                 if delay_range and delay_range[1] > 0:
                     await asyncio.sleep(1)
                 try:
-                    return await asyncio.to_thread(self.search_service.search, query, max_results, timelimit)
+                    options = {'required_names': required_names} if required_names else {}
+                    return await asyncio.to_thread(self.search_service.search, query, max_results, timelimit, **options)
                 except Exception as exc:
                     print(f' ⚠️ 单个搜索失败: {type(exc).__name__}')
                     return None
@@ -771,8 +916,12 @@ class SearchAggregator:
             part = (f"时间: {date}\n"
                     f"信源: {item['source']}\n标题: {item['title']}\n"
                     f"链接: {item['href']}\n摘要: {item['body'][:4000]}\n")
+            if item.get('_backend') in SEARCH_BACKEND_NAMES:
+                part = f"检索渠道: {item['_backend']}\n" + part
+            if item.get('_baseline'):
+                part = '证据用途: 历史比较基线，不计入已核实时效资料条数，不作为近期新闻。\n' + part
             if size + len(part) + 5 > config.MAX_RAW_DATA_CHARS:
-                break
+                continue
             parts.append(part)
             size += len(part) + 5
         if not parts and not successes:
@@ -804,7 +953,8 @@ class InvestmentSearchAggregator(SearchAggregator):
         # Reuse the common merge/format path while SEC and web searches overlap.
         web_task = super().aggregate_async(
             queries, max_results, self.config.NEWS_TIMELIMIT if timelimit is None else timelimit,
-            delay_range, return_records=True)
+            delay_range, return_records=True,
+            required_names=[name for fund in (funds or []) for name in get_search_names(fund)])
         found = await asyncio.gather(web_task, *(filings(fund) for fund in dict.fromkeys(funds or [])),
                                      return_exceptions=True)
         web, sec = found[0], [item for group in found[1:] if isinstance(group, list) for item in group]
