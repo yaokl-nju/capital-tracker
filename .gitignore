@@ -17,3 +17,4 @@ htmlcov/
 *.egg-info/
 build/
 dist/
+README.local.md
