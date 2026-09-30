@@ -3,6 +3,7 @@ import time
 from typing import Optional, Dict, Any
 
 from config.settings import LLMConfig
+from core.diagnostics import record_event
 
 
 class LLMService:
@@ -39,7 +40,9 @@ class LLMService:
         Returns:
             LLM response text or None if failed
         """
+        started = time.monotonic()
         if self.client is None:
+            record_event('model', outcome='not_configured', duration_seconds=0.0)
             return None
         for attempt in range(max_trials):
             try:
@@ -61,12 +64,23 @@ class LLMService:
                 response = self.client.chat.completions.create(**kwargs)
                 content = response.choices[0].message.content
                 if content and content.strip():
+                    usage = getattr(response, 'usage', None)
+                    counters = {}
+                    for name in ('prompt_tokens', 'completion_tokens', 'total_tokens'):
+                        value = getattr(usage, name, None)
+                        if type(value) is int and value >= 0:
+                            counters[name] = value
+                    record_event('model', outcome='completed', duration_seconds=round(time.monotonic() - started, 3),
+                                 **counters)
                     return content
                 raise ValueError("Empty LLM response")
 
             except Exception as e:
                 print(f"  [{self.model}] 请求失败: {type(e).__name__}")
                 status = getattr(e, "status_code", None)
+                record_event('model', outcome='error', error_type=type(e).__name__,
+                             status_code=status if isinstance(status, int) else 0,
+                             duration_seconds=round(time.monotonic() - started, 3))
                 if status in (400, 401, 403, 404, 422):
                     break
                 if attempt + 1 < max_trials:

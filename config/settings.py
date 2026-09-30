@@ -84,6 +84,10 @@ class Config:
 	SEC_MAX_POSITIONS = 10
 	SEARCH_DELAY_RANGE = (1, 1)
 	MIN_ANALYSIS_ITEMS = 5
+	ENABLE_TOPIC_CHECKPOINTS = True  # preserve each completed topic before the whole batch finishes
+	PDF_RENDER_TIMEOUT = 180  # one isolated renderer process per document
+	EVIDENCE_ONLY = False  # skip model query generation and analysis explicitly
+	REPORT_STYLE = 'full'  # full research or brief daily reading; same evidence rules
 	# Separate process-wide gates cap general search and SEC at 10 starts/s and 10 in flight each.
 	SEARCH_CONCURRENCY = 10
 

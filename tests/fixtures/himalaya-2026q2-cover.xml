@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="http://www.sec.gov/edgar/thirteenffiler" xmlns:com="http://www.sec.gov/edgar/common">
+  <schemaVersion>X0202</schemaVersion>
+  <headerData>
+    <submissionType>13F-HR</submissionType>
+    <filerInfo>
+      <liveTestFlag>LIVE</liveTestFlag>
+      <flags>
+        <confirmingCopyFlag>false</confirmingCopyFlag>
+        <returnCopyFlag>true</returnCopyFlag>
+        <overrideInternetFlag>false</overrideInternetFlag>
+      </flags>
+      <filer>
+        <credentials>
+          <cik>0001709323</cik>
+          <ccc>XXXXXXXX</ccc>
+        </credentials>
+      </filer>
+      <periodOfReport>06-30-2026</periodOfReport>
+    </filerInfo>
+  </headerData>
+  <formData>
+    <coverPage>
+      <reportCalendarOrQuarter>06-30-2026</reportCalendarOrQuarter>
+      <filingManager>
+        <name>Himalaya Capital Management LLC</name>
+        <address>
+          <com:street1>1301 2ND AVENUE</com:street1>
+          <com:street2>#2100</com:street2>
+          <com:city>SEATTLE</com:city>
+          <com:stateOrCountry>WA</com:stateOrCountry>
+          <com:zipCode>98101</com:zipCode>
+        </address>
+      </filingManager>
+      <reportType>13F HOLDINGS REPORT</reportType>
+      <form13FFileNumber>028-18090</form13FFileNumber>
+      <crdNumber>000157594</crdNumber>
+      <secFileNumber>801-72763</secFileNumber>
+      <provideInfoForInstruction5>N</provideInfoForInstruction5>
+    </coverPage>
+    <signatureBlock>
+      <name>Paul Teng</name>
+      <title>Chief Compliance Officer</title>
+      <phone>2067070768</phone>
+      <signature>Paul Teng</signature>
+      <city>Seattle</city>
+      <stateOrCountry>WA</stateOrCountry>
+      <signatureDate>08-14-2026</signatureDate>
+    </signatureBlock>
+    <summaryPage>
+      <otherIncludedManagersCount>0</otherIncludedManagersCount>
+      <tableEntryTotal>8</tableEntryTotal>
+      <tableValueTotal>3702921098</tableValueTotal>
+      <isConfidentialOmitted>false</isConfidentialOmitted>
+    </summaryPage>
+  </formData>
+</edgarSubmission>

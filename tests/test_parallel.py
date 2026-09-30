@@ -120,3 +120,26 @@ def test_parallel_empty_success_and_local_domain_filter(monkeypatch, config):
     assert [item['href'] for item in service.search('q')] == ['https://sec.gov/x']
     post.return_value = response([])
     assert service.search('empty') == []
+
+
+def test_parallel_pushes_allowlist_but_locally_enforces_blocked_subdomains(monkeypatch, config):
+    config.SOURCE_ALLOWLIST = {'example.com'}
+    config.SOURCE_DENYLIST = {'blocked.example.com', 'ads.'}
+    post = Mock(return_value=response([
+        {'title': 'Allowed', 'url': 'https://news.example.com/a', 'excerpts': ['funding']},
+        {'title': 'Blocked', 'url': 'https://blocked.example.com/a', 'excerpts': ['funding']},
+        {'title': 'Outside', 'url': 'https://other.example/a', 'excerpts': ['funding']},
+    ]))
+    monkeypatch.setattr('core.search_service.requests.post', post)
+    found = SearchService(config)._try_parallel('Fund investment', 5, 'w')
+    assert [r['href'] for r in found] == ['https://news.example.com/a']
+    assert post.call_args.kwargs['json']['advanced_settings']['source_policy'] == {'include_domains': ['example.com']}
+
+
+def test_parallel_pushes_plain_deny_domains_without_legacy_prefix_rules(monkeypatch, config):
+    config.SOURCE_ALLOWLIST = set()
+    config.SOURCE_DENYLIST = {'ads.', 'ad.', 'blocked.example.com'}
+    post = Mock(return_value=response([]))
+    monkeypatch.setattr('core.search_service.requests.post', post)
+    assert SearchService(config)._try_parallel('q', 5, None) == []
+    assert post.call_args.kwargs['json']['advanced_settings']['source_policy'] == {'exclude_domains': ['blocked.example.com']}

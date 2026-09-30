@@ -65,12 +65,11 @@ def test_real_pdf_chinese_tables_long_links_and_multiple_topics(monkeypatch, tmp
 
 def test_report_generation_failure_preserves_previous_file(monkeypatch, tmp_path):
     monkeypatch.setenv('XDG_CACHE_HOME', str(tmp_path / 'font-cache'))
-    from weasyprint import HTML
     target = tmp_path / 'capital.pdf'
     target.write_bytes(b'previous report')
     def fail(*args, **kwargs):
         raise OSError('disk error')
-    monkeypatch.setattr(HTML, 'write_pdf', fail)
+    monkeypatch.setattr(ReportGenerator, '_render_html', fail)
     import pytest
     with pytest.raises(RuntimeError, match='PDF 生成失败'):
         ReportGenerator(str(target)).create_pdf({'A': 'test'})
@@ -102,3 +101,37 @@ def test_complete_offline_financial_pipeline(monkeypatch, tmp_path):
     assert Path(path).with_suffix('.md').exists()
     assert tracker.search_aggregator.search_service.search.call_count == 2
     assert tracker.config.SEARCH_GL == 'CN'
+
+
+def test_pdf_source_links_and_internal_navigation_survive_final_render(tmp_path):
+    good = 'https://example.com/event($ABC)?a=1&b=2'
+    bad = 'https://invented.example/event'
+    contents = {
+        '资料来源': (f'[尖括号](<{good}> "来源标题") | [引用][ref] | [未知]({bad})\n\n'
+                   f'[ref]: <{good}>\n\n<{good}>\n\n'
+                   '<script>window.location="https://invented.example"</script>'),
+        '另一个机构': '完整分析\n\n' * 80,
+    }
+    target = tmp_path / 'sources.pdf'
+    ReportGenerator(str(target), '来源链接验证').create_pdf(
+        contents, source_urls={'资料来源': [good], '另一个机构': []})
+    reader = PdfReader(target)
+    annotations = [item.get_object() for page in reader.pages for item in page.get('/Annots', [])]
+    uris = [item.get('/A', {}).get('/URI') for item in annotations if item.get('/A', {}).get('/URI')]
+    assert uris.count(good) >= 3
+    assert bad not in uris and all('invented.example' not in uri for uri in uris)
+    assert any(item.get('/Dest') or item.get('/A', {}).get('/S') == '/GoTo' for item in annotations)
+    text = '\n'.join(page.extract_text() for page in reader.pages)
+    assert '来源链接未核实' in text
+    assert '<script>' in text  # markup stays visible data, never executable report structure
+    names = [item.get('/Title') for item in reader.outline if isinstance(item, dict)]
+    assert any('资料来源' in name for name in names)
+    assert any('另一个机构' in name for name in names)
+
+
+def test_topic_notice_is_visible_and_html_safe_in_real_pdf(tmp_path):
+    target = tmp_path / 'notice.pdf'
+    notice = '程序统计：日期未知 3 片段。<script>data only</script>'
+    ReportGenerator(str(target)).create_pdf({'Fund': '模型归纳'}, topic_notices={'Fund': notice})
+    text = '\n'.join(page.extract_text() for page in PdfReader(target).pages)
+    assert '日期未知 3 片段' in text and '<script>data only</script>' in text

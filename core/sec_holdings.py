@@ -30,6 +30,13 @@ def integer(value):
     return int(value)
 
 
+def boolean_field(node, name):
+    value = field(node, name, 'false').lower()
+    if value not in ('true', 'false', '1', '0'):
+        raise ValueError('Invalid SEC boolean field')
+    return value in ('true', '1')
+
+
 def parse_snapshot(cover_bytes, table_bytes, filing_date, expected_cik):
     cover = parse_xml(cover_bytes, 'edgarSubmission')
     table = parse_xml(table_bytes, 'informationTable')
@@ -37,6 +44,9 @@ def parse_snapshot(cover_bytes, table_bytes, filing_date, expected_cik):
         raise ValueError('Unexpected filer CIK')
     if field(cover, 'submissionType') not in ('13F-HR', '13F-HR/A'):
         raise ValueError('Not a holdings report')
+    report_type = ' '.join(field(cover, 'reportType').upper().split())
+    if report_type not in ('13F HOLDINGS REPORT', '13F COMBINATION REPORT'):
+        raise ValueError('Unknown holdings report scope')
     period = datetime.strptime(field(cover, 'reportCalendarOrQuarter'), '%m-%d-%Y').date()
     filed = date.fromisoformat(filing_date)
     if period > filed:
@@ -47,12 +57,13 @@ def parse_snapshot(cover_bytes, table_bytes, filing_date, expected_cik):
     for entry in table.findall('.//{*}infoTable'):
         issuer, security = field(entry, 'nameOfIssuer'), field(entry, 'cusip')
         share_type, put_call = field(entry, 'sshPrnamtType'), field(entry, 'putCall')
-        if not issuer or not re.fullmatch(r'[A-Za-z0-9*@#]{9}', security):
+        security_class = field(entry, 'titleOfClass')
+        if not issuer or not security_class or not re.fullmatch(r'[A-Za-z0-9*@#]{9}', security):
             raise ValueError('Invalid issuer or CUSIP')
         if share_type not in ('SH', 'PRN') or put_call not in ('', 'Put', 'Call', 'PUT', 'CALL'):
             raise ValueError('Unknown security type')
         rows.append({
-            'issuer': issuer, 'class': field(entry, 'titleOfClass'), 'cusip': security.upper(),
+            'issuer': issuer, 'class': security_class, 'cusip': security.upper(),
             'value_usd': integer(field(entry, 'value')) * multiplier,
             'shares_or_principal': integer(field(entry, 'sshPrnamt')),
             'share_type': share_type, 'put_call': put_call.upper(),
@@ -63,18 +74,19 @@ def parse_snapshot(cover_bytes, table_bytes, filing_date, expected_cik):
     # Independently rounded entries can differ slightly from the rounded cover total.
     if len(rows) != declared_entries or abs(total - declared_total) > max(1, len(rows)) * multiplier:
         raise ValueError('Incomplete information table or inconsistent totals')
-    amendment = field(cover, 'isAmendment', 'false').lower() in ('true', '1')
+    amendment = boolean_field(cover, 'isAmendment')
+    confidential = boolean_field(cover, 'isConfidentialOmitted')
     amendment_type = field(cover, 'amendmentType').upper()
-    if field(cover, 'submissionType').endswith('/A') and not amendment:
+    if field(cover, 'submissionType').endswith('/A') != amendment:
         raise ValueError('Inconsistent amendment flag')
     return {
         'period': period.isoformat(), 'filing_date': filing_date,
         'manager': field(cover, 'name'), 'cik': f'{int(expected_cik):010d}',
-        'report_type': field(cover, 'reportType'),
+        'report_type': report_type,
         'total_value_usd': total, 'declared_total_usd': declared_total, 'rows': rows,
         'amendment_type': amendment_type if amendment else '',
         'complete': (not amendment or amendment_type == 'RESTATEMENT') and
-                    field(cover, 'isConfidentialOmitted', 'false').lower() not in ('true', '1'),
+                    not confidential,
     }
 
 
@@ -139,7 +151,7 @@ def format_snapshot(snapshot, previous=None, limit=10):
              f'按申报市值显示前 {len(selected)} 项，共 {len(positions)} 项；未展示项不等于清仓。{note}。']
     if previous:
         lines.append(f'数量比较基准：上期报告期 {previous["period"]}，申报日期 {previous["filing_date"]}；'
-                     '比较使用两期完整信息表，展示条数限制不参与数量差计算。')
+                     '已读取两期信息表，完整性与可比性见上述说明；展示条数限制不参与数量差计算。')
     if snapshot['total_value_usd'] != snapshot.get('declared_total_usd', snapshot['total_value_usd']):
         lines.append(f'信息表逐项合计与封面声明合计差 USD '
                      f'{snapshot["total_value_usd"] - snapshot["declared_total_usd"]:+,}，'

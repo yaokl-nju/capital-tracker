@@ -14,6 +14,7 @@ def cover(period='06-30-2026', entries=1, total=100, amendment='', confidential=
     return f'''<edgarSubmission xmlns="http://www.sec.gov/edgar/thirteenffiler">
         <submissionType>{form}</submissionType><cik>{cik}</cik>
         <reportCalendarOrQuarter>{period}</reportCalendarOrQuarter><name>Test Manager</name>
+        <reportType>13F HOLDINGS REPORT</reportType>
         {amendment_xml}<tableEntryTotal>{entries}</tableEntryTotal><tableValueTotal>{total}</tableValueTotal>
         <isConfidentialOmitted>{confidential}</isConfidentialOmitted></edgarSubmission>'''.encode()
 
@@ -35,7 +36,9 @@ def snapshot(period='06-30-2026', shares=10, value=100, **kwargs):
 
 def test_real_sec_fixture_totals_share_classes_and_rounding():
     xml = Path(__file__).with_name('fixtures').joinpath('himalaya-2026q2-information-table.xml').read_bytes()
-    result = parse_snapshot(cover(entries=8, total=3702921098), xml, '2026-08-14', '1709323')
+    cover_xml = Path(__file__).with_name('fixtures').joinpath('himalaya-2026q2-cover.xml').read_bytes()
+    result = parse_snapshot(cover_xml, xml, '2026-08-14', '1709323')
+    assert result['manager'] == 'Himalaya Capital Management LLC' and result['complete']
     assert len(result['rows']) == 8 and result['total_value_usd'] == 3702921099
     alphabets = [row for row in result['rows'] if row['issuer'] == 'ALPHABET INC']
     assert len(alphabets) == 2 and len({row['cusip'] for row in alphabets}) == 2
@@ -80,10 +83,40 @@ def test_invalid_identity_incomplete_tables_and_bad_totals_rejected(kwargs):
 
 
 @pytest.mark.parametrize('xml', [b'<!DOCTYPE informationTable [<!ENTITY x "boom">]><informationTable/>',
-                               b'<wrong/>', b'<informationTable>\x00</informationTable>', b'x' * 5_000_001])
+                               b'<wrong/>', b'<informationTable>\x00</informationTable>', b'x' * 5_000_001],
+                         ids=['dtd-entity', 'wrong-root', 'nul-byte', 'over-size-limit'])
 def test_unsafe_wrong_or_oversized_xml_rejected(xml):
     with pytest.raises(ValueError):
         parse_xml(xml, 'informationTable')
+
+
+@pytest.mark.parametrize('field,value', [('isConfidentialOmitted', 'maybe'), ('isConfidentialOmitted', ''),
+                                        ('isAmendment', 'unknown')])
+def test_unknown_boolean_flags_never_become_complete_holdings(field, value):
+    xml = cover().replace(b'<isConfidentialOmitted>false</isConfidentialOmitted>',
+                          f'<{field}>{value}</{field}>'.encode())
+    with pytest.raises(ValueError, match='boolean field'):
+        parse_snapshot(xml, table(), '2026-08-14', '1709323')
+
+
+@pytest.mark.parametrize('scope', ['13F NOTICE', 'UNKNOWN', ''])
+def test_unknown_report_scope_does_not_support_holdings_inferences(scope):
+    xml = cover().replace(b'13F HOLDINGS REPORT', scope.encode())
+    with pytest.raises(ValueError, match='report scope'):
+        parse_snapshot(xml, table(), '2026-08-14', '1709323')
+
+
+def test_blank_share_class_is_not_an_aggregatable_security():
+    with pytest.raises(ValueError, match='issuer or CUSIP'):
+        parse_snapshot(cover(), table([('Issuer', '', '123456789', 100, 10, 'SH', '')]),
+                       '2026-08-14', '1709323')
+
+
+def test_partial_baseline_is_never_described_as_two_complete_tables():
+    current, previous = snapshot(shares=20), snapshot('03-31-2026', confidential='true')
+    text = format_snapshot(current, previous)
+    assert '未进行完整增减持比较' in text
+    assert '两期完整信息表' not in text and '完整性与可比性见上述说明' in text
 
 
 @pytest.mark.parametrize('value', ['-1', 'NaN', '1e10', 'Infinity', '10.5'])

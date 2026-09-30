@@ -24,6 +24,7 @@ from config.fund_mappings import get_sec_edgar_name, get_sec_cik, get_search_nam
 from core.sec_holdings import enrich_filings
 from core.search_cache import SQLiteCache, cache_identity
 from core.search_policy import mentions_topic
+from core.diagnostics import record_event
 
 
 class SearchRequestGate:
@@ -167,7 +168,11 @@ def is_similar_title(title1: str, title2: str, threshold: float = 0.8) -> bool:
 
 def domain_matches(domain: str, rule: str) -> bool:
     """Match a hostname exactly or beneath a domain, never by substring."""
-    rule = rule.lower().strip().strip('.')
+    try:
+        domain = domain.casefold().rstrip('.').encode('idna').decode('ascii')
+        rule = rule.casefold().strip().strip('.').encode('idna').decode('ascii')
+    except (AttributeError, UnicodeError):
+        return False
     return bool(rule) and (domain == rule or domain.endswith('.' + rule))
 
 
@@ -230,6 +235,20 @@ class SearchService:
                 print(f' ⚠️ 磁盘搜索缓存初始化失败，使用内存缓存: {type(exc).__name__}')
 
     def search(
+        self, query: str, max_results: int = 10, timelimit: str = 'w', *, required_names=None
+    ) -> Optional[List[Dict[str, Any]]]:
+        started = time.monotonic()
+        try:
+            results = self._search(query, max_results, timelimit, required_names=required_names)
+            record_event('query', outcome=('unavailable' if results is None else 'results' if results else 'empty'),
+                         result_count=len(results or []), duration_seconds=round(time.monotonic() - started, 3))
+            return results
+        except Exception as exc:
+            record_event('query', outcome='error', error_type=type(exc).__name__,
+                         duration_seconds=round(time.monotonic() - started, 3))
+            raise
+
+    def _search(
         self,
         query: str,
         max_results: int = 10,
@@ -254,6 +273,7 @@ class SearchService:
                     cached = [item for item in cached if self._mentions_topic(item, names)]
                 if cached:
                     print(f"  [缓存命中] {query[:30]}...")
+                    record_event('cache', cache_hit=True, result_count=len(cached))
                     return cached
 
         completed = False
@@ -264,7 +284,11 @@ class SearchService:
             if results:
                 results = self._process_results(results)
                 if names:
+                    original_count = len(results)
                     results = [item for item in results if self._mentions_topic(item, names)]
+                    if len(results) < original_count:
+                        record_event('filter', backend=backend, outcome='institution_or_scope',
+                                     result_count=original_count - len(results))
                 if timelimit:
                     days = {'d': 1, 'w': 7, 'm': 31, 'y': 366}[timelimit]
                     cutoff = (datetime.now() - timedelta(days=days)).date()
@@ -282,6 +306,16 @@ class SearchService:
     _mentions_topic = staticmethod(mentions_topic)
 
     def _run_backend(
+        self, backend: str, query: str, max_results: int, timelimit: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        started = time.monotonic()
+        results = self._dispatch_backend(backend, query, max_results, timelimit)
+        record_event('backend', backend=backend,
+                     outcome=('unavailable' if results is None else 'results' if results else 'empty'),
+                     result_count=len(results or []), duration_seconds=round(time.monotonic() - started, 3))
+        return results
+
+    def _dispatch_backend(
         self,
         backend: str,
         query: str,
@@ -322,6 +356,7 @@ class SearchService:
             with _SEARCH_REQUEST_GATE.request():
                 return method(query, max_results, timelimit)
         except Exception as exc:
+            record_event('backend_error', backend=backend, outcome='error', error_type=type(exc).__name__)
             print(f" ⚠️ {backend} 搜索失败: {type(exc).__name__}")
             return None
 
@@ -350,6 +385,21 @@ class SearchService:
         if not proxy:
             return None
         return {"http": proxy, "https": proxy}
+
+    @staticmethod
+    def _provider_domains(rules, exclude=False):
+        """Send plain domain rules only; legacy prefix blocks stay in local filtering."""
+        domains = []
+        for rule in rules:
+            if not isinstance(rule, str) or (exclude and rule.endswith('.')):
+                continue
+            try:
+                rule = rule.strip().casefold().rstrip('.').encode('idna').decode('ascii')
+            except UnicodeError:
+                continue
+            if re.fullmatch(r'(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?', rule):
+                domains.append(rule)
+        return sorted(set(domains))
 
     def _timeout(self) -> int:
         """Per-backend HTTP timeout (seconds)."""
@@ -423,6 +473,7 @@ class SearchService:
 
     def _request_json(self, backend, method, url, **kwargs):
         """One HTTP attempt with shared timeout/proxy and credential-safe errors."""
+        started = time.monotonic()
         try:
             response = getattr(requests, method)(
                 url, timeout=self._timeout(), proxies=self._proxy_map(), **kwargs)
@@ -430,9 +481,16 @@ class SearchService:
             data = response.json()
             if not isinstance(data, dict):
                 raise ValueError('Invalid search response')
+            status = getattr(response, 'status_code', 0)
+            record_event('request', backend=backend.lower(), outcome='completed',
+                         status_code=status if isinstance(status, int) else 0,
+                         duration_seconds=round(time.monotonic() - started, 3))
             return data
         except Exception as exc:
             status = getattr(getattr(exc, 'response', None), 'status_code', '未知')
+            record_event('request', backend=backend.lower(), outcome='error', error_type=type(exc).__name__,
+                         status_code=status if isinstance(status, int) else 0,
+                         duration_seconds=round(time.monotonic() - started, 3))
             if backend == 'Brave' and status == 429:
                 seconds = self._brave_reset_seconds(exc.response.headers)
                 with _COOLDOWN_LOCK:
@@ -558,6 +616,7 @@ class SearchService:
         except Exception as exc:
             if type(exc).__name__ == 'DDGSException' and str(exc) == 'No results found.':
                 return []
+            record_event('backend_error', backend='ddgs_' + surface, outcome='error', error_type=type(exc).__name__)
             print(f' ⚠️ DDGS {surface} 单次搜索失败: {type(exc).__name__}')
             return None
 
@@ -582,6 +641,13 @@ class SearchService:
                 'location': self.config.SEARCH_GL.lower(),
             },
         }
+        includes = self._provider_domains(self.config.SOURCE_ALLOWLIST)
+        excludes = self._provider_domains(self.config.SOURCE_DENYLIST, exclude=True)
+        # Parallel ignores exclude_domains when includes are set. Local filtering
+        # always applies both policies, including narrower blocked subdomains.
+        policy = {'include_domains': includes} if includes else {'exclude_domains': excludes} if excludes else {}
+        if policy and len(includes or excludes) <= 200:
+            payload['advanced_settings']['source_policy'] = policy
         data = self._request_json('Parallel', 'post', 'https://api.parallel.ai/v1/search',
                                  headers={'x-api-key': key, 'Content-Type': 'application/json'}, json=payload)
         if data is None:
@@ -611,6 +677,12 @@ class SearchService:
         payload = {'query': query, 'max_results': min(max_results, 20), 'search_depth': 'basic',
                    'include_answer': False, 'include_raw_content': False,
                    'topic': 'news', 'include_published_date': True}
+        includes = self._provider_domains(self.config.SOURCE_ALLOWLIST)
+        excludes = self._provider_domains(self.config.SOURCE_DENYLIST, exclude=True)
+        if includes and len(includes) <= 100:
+            payload['include_domains'] = includes
+        if excludes and len(excludes) <= 100:
+            payload['exclude_domains'] = excludes
         if timelimit:
             payload['time_range'] = {'d': 'day', 'w': 'week', 'm': 'month', 'y': 'year'}[timelimit]
         data = self._request_json('Tavily', 'post', 'https://api.tavily.com/search',
@@ -655,6 +727,13 @@ class SearchService:
             if score == 0:
                 continue
             item = dict(result)
+            # Freeze relative provider dates at retrieval time. Archived "yesterday"
+            # must not move forward when a report is reopened a month later.
+            relative_date = re.fullmatch(r'(?:yesterday|昨天|\d+\s*(?:hour|day|week|month|year)s?\s+ago|'
+                                         r'\d+\s*(?:天|周|个月|年|小时|分钟)前)', record_date.strip(), re.I)
+            if parsed is not None and relative_date:
+                item['_date_original'] = record_date
+                record_date = parsed.isoformat()
             item.update(href=url, title=title.strip()[:512],
                         body=str(result.get('body') or result.get('description') or ''),
                         source=str(result.get('source') or domain), date=record_date,
@@ -918,6 +997,8 @@ class SearchAggregator:
                     f"链接: {item['href']}\n摘要: {item['body'][:4000]}\n")
             if item.get('_backend') in SEARCH_BACKEND_NAMES:
                 part = f"检索渠道: {item['_backend']}\n" + part
+            if item.get('_date_original'):
+                part += f"日期表示说明: 原渠道返回 {item['_date_original']}；已在检索时换算日期，非事件发生时间。\n"
             if item.get('_baseline'):
                 part = '证据用途: 历史比较基线，不计入已核实时效资料条数，不作为近期新闻。\n' + part
             if size + len(part) + 5 > config.MAX_RAW_DATA_CHARS:

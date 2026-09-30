@@ -7,6 +7,25 @@ SUFFIX_WORDS = {'capital', 'management', 'asset', 'assets', 'investment', 'inves
                 'inc', 'llc', 'lp', 'ltd', 'advisors', 'advisers', 'the'}
 # Observed collisions: mountains/IPO, Mars rover/virtue, seasons/real-estate projects.
 AMBIGUOUS_SINGLE_BRANDS = {'himalaya', 'perseverance', 'springs'}
+AMBIGUOUS_CHINESE_BRANDS = {'喜马拉雅'}
+
+NONCAPITAL_TITLES = re.compile(
+    r'interview\s+(?:questions|prep|preparation)|(?:coding|technical)\s+interview|'
+    r'(?:software\s+engineer|internship)\s+(?:salary|interview)|'
+    r'(?:jobs|careers)\s+(?:at|in)\b|面经|笔试题|招聘岗位|实习招聘|求职攻略', re.I)
+CAPITAL_EVENT_TITLE = re.compile(
+    r'\b(?:acquisition|acquires?|fundraising|raises?|funding|financing|holdings?|stake|'
+    r'merger|divestment|13f|13g|13d)\b|融资|募资|并购|收购|持仓|增持|减持|资金流', re.I)
+
+
+def identity_conflict(item, names):
+    """Exclude a demonstrated homonym only when the target identity is absent."""
+    if not any(name.casefold() in {'himalaya capital', 'himalaya capital management llc'} for name in names):
+        return False
+    text = ' '.join(str(item.get(field) or '') for field in ('title', 'body', 'href')).casefold()
+    conflict = re.search(r'(?<![a-z0-9.-])(?:www\.)?himalayacapital\.in(?=[/:\s]|$)', text)
+    anchor = re.search(r'\bli\s+lu\b|李录|himcap\.com|himalayacapital\.com|himalaya capital management llc', text)
+    return bool(conflict and not anchor)
 
 
 def _phrase(words):
@@ -15,6 +34,11 @@ def _phrase(words):
 
 def mentions_topic(item, names):
     """Match full names or distinctive brand phrases, not isolated common surnames."""
+    title = str(item.get('title') or '')
+    if NONCAPITAL_TITLES.search(title) and not CAPITAL_EVENT_TITLE.search(title):
+        return False
+    if identity_conflict(item, names):
+        return False
     patterns = []
     for name in names:
         words = re.findall(r'[a-z0-9]+|[\u4e00-\u9fff]+', name.casefold())
@@ -32,7 +56,7 @@ def mentions_topic(item, names):
             if re.search(r'[\u4e00-\u9fff]', word):
                 patterns.append(re.escape(word))
                 short = re.sub(r'(?:资产管理|投资管理|基金管理|资本管理|基金|资产|资本|投资|控股|集团|管理|公司)$', '', word)
-                if len(short) >= 2:
+                if len(short) >= 2 and short not in AMBIGUOUS_CHINESE_BRANDS:
                     patterns.append(re.escape(short))
     if not patterns:
         return True

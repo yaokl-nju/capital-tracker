@@ -91,3 +91,26 @@ def test_all_irrelevant_results_are_successful_empty_not_outage():
     service = SearchService(cfg)
     service._run_backend = Mock(return_value=[item('Unrelated capital news')])
     assert service.search('BlackRock investment', required_names=['BlackRock']) == []
+def test_observed_himalaya_identity_conflict_is_not_the_us_manager():
+    from core.search_policy import mentions_topic
+    from config.fund_mappings import get_search_names, get_identity_context
+    names = get_search_names('Himalaya Capital')
+    item = {'title': 'Himalaya Capital', 'body': 'Founded Year: 2022 Bengaluru Website Url: http://himalayacapital.in',
+            'href': 'https://platform.tracxn.com/a/d/company/profile'}
+    assert not mentions_topic(item, names)
+    item['body'] += ' Compared with Li Lu of Himalaya Capital, founded in 1997'
+    assert mentions_topic(item, names)
+    assert 'Li Lu' in get_identity_context('Himalaya Capital')
+    assert not mentions_topic({'title': '喜马拉雅完成融资，播客平台发展', 'body': '', 'href': 'https://example.com'}, names)
+    assert mentions_topic({'title': '李录投资理念', 'body': '', 'href': 'https://example.com'}, names)
+
+
+def test_interview_preparation_filtered_without_excluding_investor_interviews():
+    from core.search_policy import mentions_topic
+    names = ['Two Sigma']
+    def result(title):
+        return {'title': title, 'body': 'quantitative investment firm Two Sigma', 'href': 'https://example.com/a'}
+    assert not mentions_topic(result('Two Sigma Software Engineer Interview Questions (Updated 2026)'), names)
+    assert mentions_topic(result('Interview: Two Sigma investor explains portfolio strategy'), names)
+    assert mentions_topic(result('Two Sigma acquires interview preparation startup'), names)
+    assert not mentions_topic(result('Two Sigma 实习招聘与面经'), names)

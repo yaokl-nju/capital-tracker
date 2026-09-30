@@ -33,7 +33,7 @@ def test_original_prompt_dimensions_and_format_preserved():
     summary = InvestmentSummarizer().get_prompt('Fund', 'Evidence')
     for dimension in ['持仓披露文件', '新建仓与增持', '资产类别/赛道关键词', '投资逻辑', '具体高增长信号']:
         assert dimension in query
-    assert '每个维度 5-8 个' in query
+    assert '每个维度最多 3 个' in query
     for heading in ['#### 1. 🎯 核心持仓（二级市场）', '#### 2. 📊 行业/赛道聚焦',
                     '#### 3. 💡 投资逻辑拆解', '#### 4. 🚀 新建仓/大幅增持标的', '#### 5. 🇨🇳 中国相关资产']:
         assert heading in summary

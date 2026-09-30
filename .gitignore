@@ -21,3 +21,10 @@ README.local.md
 VALIDATION.md
 README.md
 ITERATION_LOG.md
+ITERATION_20260930.md
+*.cache
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+.checkpoints/

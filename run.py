@@ -10,6 +10,10 @@ from core.orchestrator import Orchestrator
 from core.email_service import EmailConfig
 from config.settings import Config
 from core.search_service import SearchService, SEARCH_BACKEND_NAMES
+from config.research_profiles import load_profile, normalize_domains
+from core.artifacts import render_report_archive
+from core.archive_compare import save_archive_comparison
+from core.checkpoint_recovery import recover_checkpoint_report
 
 
 # Reports stay within the project unless an output directory is supplied.
@@ -36,52 +40,52 @@ DEFAULT_TOPICS = {
         "Dragoneer Investment Group",  # 公募+成长股+Pre-IPO
         "Baillie Gifford",             # 超长期成长
 
-        # # =======================================================
-        # # 第二梯队：顶级集中型 / 宏观+基本面投资人
-        # # 仓位变化通常信息量很大
-        # # =======================================================
-        # "Duquesne Family Office",
-        # "Appaloosa Management",
-        # "Pershing Square",
-        # "Third Point",
-        # "TCI Fund Management",
-        # "Himalaya Capital",
-        # "Berkshire Hathaway",          
-        # "Baupost Group",               # 价值/特殊机会
-        # "Elliott Investment Management", # 激进投资/事件驱动
+        # =======================================================
+        # 第二梯队：顶级集中型 / 宏观+基本面投资人
+        # 仓位变化通常信息量很大
+        # =======================================================
+        "Duquesne Family Office",
+        "Appaloosa Management",
+        "Pershing Square",
+        "Third Point",
+        "TCI Fund Management",
+        "Himalaya Capital",
+        "Berkshire Hathaway",
+        "Baupost Group",               # 价值/特殊机会
+        "Elliott Investment Management", # 激进投资/事件驱动
 
-        # # =======================================================
-        # # 第三梯队：全球主动型长线机构
-        # # 不适合简单抄作业，更适合确认产业大趋势
-        # # =======================================================
-        # "GQG Partners",
-        # "Capital Group",
-        # "T. Rowe Price",
-        # "Fidelity",
-        # "Wellington Management",
+        # =======================================================
+        # 第三梯队：全球主动型长线机构
+        # 不适合简单抄作业，更适合确认产业大趋势
+        # =======================================================
+        "GQG Partners",
+        "Capital Group",
+        "T. Rowe Price",
+        "Fidelity",
+        "Wellington Management",
 
-        # # =======================================================
-        # # 第四梯队：医疗 / Biotech 专业资本
-        # # 医药股建议单独分析
-        # # =======================================================
-        # "Baker Bros. Advisors",
-        # "RA Capital Management",
-        # "Perceptive Advisors",
-        # "EcoR1 Capital",
-        # "OrbiMed",                     
+        # =======================================================
+        # 第四梯队：医疗 / Biotech 专业资本
+        # 医药股建议单独分析
+        # =======================================================
+        "Baker Bros. Advisors",
+        "RA Capital Management",
+        "Perceptive Advisors",
+        "EcoR1 Capital",
+        "OrbiMed",
 
-        # # =======================================================
-        # # 第五梯队：宏观 / 资产配置
-        # # 看方向，不宜直接用个股持仓做抄作业
-        # # =======================================================
-        # "Bridgewater Associates",
-        # "Soros Fund Management",
+        # =======================================================
+        # 第五梯队：宏观 / 资产配置
+        # 看方向，不宜直接用个股持仓做抄作业
+        # =======================================================
+        "Bridgewater Associates",
+        "Soros Fund Management",
 
-        # # =======================================================
-        # # 第六梯队：量化 / 多经理平台
-        # # 主要观察资金流，不作为基本面选股信号
-        # # =======================================================
-        # "Two Sigma",
+        # =======================================================
+        # 第六梯队：量化 / 多经理平台
+        # 主要观察资金流，不作为基本面选股信号
+        # =======================================================
+        "Two Sigma",
     ],
     'investment_china': [
         # =======================================================
@@ -92,47 +96,47 @@ DEFAULT_TOPICS = {
         "Greenwoods Asset Management",    # 景林
         "Springs Capital",                # 淡水泉
 
-        # # =======================================================
-        # # 第二梯队：全球资金中的中国核心主动投资者
-        # # 港股/中概股/海外上市中国公司尤其重要
-        # # =======================================================
-        # "HHLR Advisors",                  # Hillhouse / 高瓴
-        # "Schroders",
+        # =======================================================
+        # 第二梯队：全球资金中的中国核心主动投资者
+        # 港股/中概股/海外上市中国公司尤其重要
+        # =======================================================
+        "HHLR Advisors",                  # Hillhouse / 高瓴
+        "Schroders",
 
-        # # =======================================================
-        # # 第三梯队：全球大型机构 / 配置型资本
-        # # 看外资整体态度，不把单笔交易当成强选股信号
-        # # =======================================================
-        # "BlackRock",
-        # "JPMorgan Asset Management",
+        # =======================================================
+        # 第三梯队：全球大型机构 / 配置型资本
+        # 看外资整体态度，不把单笔交易当成强选股信号
+        # =======================================================
+        "BlackRock",
+        "JPMorgan Asset Management",
 
-        # # =======================================================
-        # # 第四梯队：中国一级市场 / Pre-IPO / 产业趋势资本
-        # # 判断未来3-10年的产业方向
-        # # =======================================================
-        # "HSG",                            # HongShan / 红杉中国
-        # "Loyal Valley Capital",
-        # "Boyu Capital",                   
-        # "Primavera Capital",              # 春华资本，建议新增
-        # "FountainVest Partners",          # 方源资本，建议新增
-        # "CPE",                            # 中信产业基金体系
-        # "General Atlantic",               # 全球成长资本
-        # "Warburg Pincus",                 # 中国投资历史很长
+        # =======================================================
+        # 第四梯队：中国一级市场 / Pre-IPO / 产业趋势资本
+        # 判断未来3-10年的产业方向
+        # =======================================================
+        "HSG",                            # HongShan / 红杉中国
+        "Loyal Valley Capital",
+        "Boyu Capital",
+        "Primavera Capital",              # 春华资本，建议新增
+        "FountainVest Partners",          # 方源资本，建议新增
+        "CPE",                            # 中信产业基金体系
+        "General Atlantic",               # 全球成长资本
+        "Warburg Pincus",                 # 中国投资历史很长
 
-        # # =======================================================
-        # # 第五梯队：中国公募：本土机构确认信号
-        # # =======================================================
-        # "E Fund",
-        # "Fullgoal",
+        # =======================================================
+        # 第五梯队：中国公募：本土机构确认信号
+        # =======================================================
+        "E Fund",
+        "Fullgoal",
 
-        # # =======================================================
-        # # 第六梯队：主权财富基金
-        # # =======================================================
-        # "Temasek",
-        # "GIC",
-        # "Norges Bank Investment Management",  # 挪威主权基金
-        # "CPP Investments",
-        # "Mubadala",
+        # =======================================================
+        # 第六梯队：主权财富基金
+        # =======================================================
+        "Temasek",
+        "GIC",
+        "Norges Bank Investment Management",  # 挪威主权基金
+        "CPP Investments",
+        "Mubadala",
     ],
 }
 
@@ -221,7 +225,7 @@ def main():
     parser.add_argument(
         '--tracker',
         choices=['investment', 'investment_china', 'all'],
-        default='all',
+        default=None,
         help='Type of tracker to run'
     )
     parser.add_argument(
@@ -247,16 +251,78 @@ def main():
         help='Email password/authorization code'
     )
     parser.add_argument('--doctor', action='store_true', help='Show local readiness without network calls or key values')
+    parser.add_argument('--profile', help='JSON research preset with separate topic lists for each market')
+    parser.add_argument('--dry-run', action='store_true', help='Print effective research plan without network calls or files')
+    parser.add_argument('--render-archive', help='Re-render a saved JSON report offline; no search, model or email calls')
+    parser.add_argument('--recover-checkpoints', help='Assemble one checkpoint batch offline, including unfinished topics')
+    parser.add_argument('--compare-archives', nargs=2, metavar=('BEFORE', 'AFTER'),
+                        help='Compare retrieved sources in two JSON archives offline')
     parser.add_argument('--max-queries', type=int, help='Maximum queries per topic (1–50)')
     parser.add_argument('--max-results', type=int, help='Maximum results per query (1–20)')
     parser.add_argument('--timelimit', choices=['d', 'w', 'm', 'y', 'none'], help='News date window')
     parser.add_argument('--search-backends', nargs='+', choices=SEARCH_BACKEND_NAMES,
                         help='Override search priority; gdelt is an optional free news index')
-    parser.add_argument('--no-cache', action='store_true', help='Bypass all search caches')
+    cache_options = parser.add_mutually_exclusive_group()
+    cache_options.add_argument('--no-cache', action='store_true', default=None, help='Bypass all search caches')
+    cache_options.add_argument('--cache', dest='no_cache', action='store_false', help='Enable search caches, overriding the profile')
     parser.add_argument('--cache-path', help='Optional SQLite search cache shared between runs')
-    parser.add_argument('--sec-holdings', action='store_true', help='Read verified SEC 13F XML holdings and a prior snapshot')
+    checkpoint_options = parser.add_mutually_exclusive_group()
+    checkpoint_options.add_argument('--no-checkpoints', action='store_true', default=None,
+                        help='Disable saving completed topics during a batch')
+    checkpoint_options.add_argument('--checkpoints', dest='no_checkpoints', action='store_false',
+                                    help='Enable topic checkpoints, overriding the profile')
+    parser.add_argument('--allow-domains', nargs='+', help='Keep only these domains and their subdomains')
+    parser.add_argument('--deny-domains', nargs='+', help='Exclude additional domains and their subdomains')
+    parser.add_argument('--evidence-only', action=argparse.BooleanOptionalAction, default=None,
+                        help='Use fallback queries and save evidence without any model calls')
+    parser.add_argument('--report-style', choices=['full', 'brief'], help='Full research or concise daily brief')
+    parser.add_argument('--sec-holdings', action=argparse.BooleanOptionalAction, default=None,
+                        help='Read verified SEC 13F XML holdings and a prior snapshot')
 
     args = parser.parse_args()
+
+    if args.render_archive or args.compare_archives or args.recover_checkpoints:
+        incompatible = [name for name in ('tracker', 'topics', 'max_workers', 'email', 'email_password',
+                         'profile', 'max_queries', 'max_results', 'timelimit',
+                         'search_backends', 'no_cache', 'cache_path', 'sec_holdings', 'no_checkpoints',
+                         'allow_domains', 'deny_domains', 'evidence_only', 'report_style')
+                        if getattr(args, name) is not None]
+        incompatible += [name for name in ('doctor', 'dry_run') if getattr(args, name)]
+        if incompatible:
+            parser.error('Offline archive commands only accept --output-dir')
+        if sum(bool(value) for value in (args.render_archive, args.compare_archives, args.recover_checkpoints)) > 1:
+            parser.error('Choose only one offline archive command')
+        try:
+            if args.recover_checkpoints:
+                path = recover_checkpoint_report(args.recover_checkpoints, args.output_dir)
+                print(f'✅ 检查点恢复报告已保存: {path}')
+            elif args.compare_archives:
+                path = save_archive_comparison(*args.compare_archives, output_dir=args.output_dir)
+                print(f'✅ 来源对照已保存: {path}')
+            else:
+                render_report_archive(args.render_archive, args.output_dir)
+        except (OSError, ValueError) as exc:
+            parser.error(f'Cannot render report archive: {exc}')
+        return
+
+    profile = {}
+    if args.profile:
+        try:
+            profile = load_profile(args.profile)
+        except (OSError, ValueError, TypeError) as exc:
+            parser.error(f'Cannot load research profile: {exc}')
+        for field, value in profile['options'].items():
+            if getattr(args, field) is None:
+                setattr(args, field, value)
+    args.tracker = args.tracker or profile.get('tracker', 'all')
+    if args.topics is not None:
+        args.topics = list(dict.fromkeys(t.strip() for t in args.topics if t.strip()))
+        if not args.topics:
+            parser.error('--topics requires at least one non-empty topic')
+    markets = list(TRACKER_CLASSES) if args.tracker == 'all' else [args.tracker]
+    topic_lists = {market: (args.topics if args.topics is not None else
+                            profile.get('topics', {}).get(market, DEFAULT_TOPICS[market]))
+                   for market in markets}
 
     if args.max_workers is not None and args.max_workers < 1:
         parser.error('--max-workers must be positive')
@@ -273,14 +339,52 @@ def main():
         config.NEWS_TIMELIMIT = None if args.timelimit == 'none' else args.timelimit
     if args.search_backends:
         config.SEARCH_BACKENDS = list(dict.fromkeys(args.search_backends))
-    if args.no_cache:
-        config.ENABLE_SEARCH_CACHE = False
+    if args.no_cache is not None:
+        config.ENABLE_SEARCH_CACHE = not args.no_cache
     if args.cache_path:
         config.SEARCH_CACHE_PATH = args.cache_path
-    if args.sec_holdings:
-        config.SEC_INCLUDE_HOLDINGS = True
+    if args.sec_holdings is not None:
+        config.SEC_INCLUDE_HOLDINGS = args.sec_holdings
+    if args.no_checkpoints is not None:
+        config.ENABLE_TOPIC_CHECKPOINTS = not args.no_checkpoints
+    if args.evidence_only is not None:
+        config.EVIDENCE_ONLY = args.evidence_only
+    if args.report_style is not None:
+        config.REPORT_STYLE = args.report_style
+    for field, attribute in [('allow_domains', 'SOURCE_ALLOWLIST'), ('deny_domains', 'SOURCE_DENYLIST')]:
+        values = getattr(args, field)
+        if values is not None:
+            try:
+                domains = set(normalize_domains(values))
+            except ValueError as exc:
+                parser.error(str(exc))
+            setattr(config, attribute, domains if field == 'allow_domains' else config.SOURCE_DENYLIST | domains)
     if args.doctor:
         show_readiness(config)
+        return
+    if args.dry_run:
+        print(json.dumps({
+            'network_checked': False,
+            'profile': profile.get('name', ''),
+            'markets': [{'tracker': market, 'topics': topic_lists[market],
+                         'output_dir': args.output_dir or OUTPUT_DIRS[market]}
+                        for market in markets],
+            'max_workers': args.max_workers or config.CONCURRENCY,
+            'max_queries_per_topic': config.MAX_QUERIES,
+            'max_results_per_query': config.MAX_RESULTS,
+            'query_budget': sum(len(v) for v in topic_lists.values()) * config.MAX_QUERIES,
+            'search_backends': config.SEARCH_BACKENDS,
+            'news_timelimit': config.NEWS_TIMELIMIT,
+            'cache_enabled': config.ENABLE_SEARCH_CACHE,
+            'sec_holdings_enabled': config.SEC_INCLUDE_HOLDINGS,
+            'sec_holdings_ready_locally': config.SEC_INCLUDE_HOLDINGS and bool(config.SEC_USER_AGENT),
+            'email_requested': bool(args.email),
+            'topic_checkpoints_enabled': config.ENABLE_TOPIC_CHECKPOINTS,
+            'analysis_mode': 'evidence_only' if config.EVIDENCE_ONLY else 'model_if_available',
+            'report_style': config.REPORT_STYLE,
+            'source_allowlist': sorted(config.SOURCE_ALLOWLIST),
+            'source_denylist': sorted(config.SOURCE_DENYLIST),
+        }, ensure_ascii=False, indent=2))
         return
 
     if args.tracker == 'all':
@@ -293,7 +397,7 @@ def main():
             try:
                 run_tracker(
                     tracker_type=tracker_type,
-                    topics=args.topics,
+                    topics=topic_lists[tracker_type],
                     output_dir=args.output_dir,
                     max_workers=args.max_workers,
                     send_email=bool(args.email),
@@ -310,7 +414,7 @@ def main():
         # Run single tracker
         run_tracker(
             tracker_type=args.tracker,
-            topics=args.topics,
+            topics=topic_lists[args.tracker],
             output_dir=args.output_dir,
             max_workers=args.max_workers,
             send_email=bool(args.email),
@@ -342,12 +446,16 @@ def show_readiness(config):
         'locally_available_backends': enabled,
         'sec_user_agent_present': bool(config.SEC_USER_AGENT),
         'sec_holdings_enabled': config.SEC_INCLUDE_HOLDINGS,
+        'sec_holdings_ready_locally': config.SEC_INCLUDE_HOLDINGS and bool(config.SEC_USER_AGENT),
         'pdf_runtime_ready': pdf_ready,
         'cache_enabled': config.ENABLE_SEARCH_CACHE,
         'disk_cache_configured': bool(config.SEARCH_CACHE_PATH),
         'max_queries': config.MAX_QUERIES,
         'max_results': config.MAX_RESULTS,
         'news_timelimit': config.NEWS_TIMELIMIT,
+        'topic_checkpoints_enabled': config.ENABLE_TOPIC_CHECKPOINTS,
+        'analysis_mode': 'evidence_only' if config.EVIDENCE_ONLY else 'model_if_available',
+        'report_style': config.REPORT_STYLE,
     }, ensure_ascii=False, indent=2))
 
 

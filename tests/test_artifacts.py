@@ -108,6 +108,8 @@ def test_sidecars_preserved_when_pdf_fails(monkeypatch, tmp_path):
         Orchestrator(tracker).generate_report({'Fund': 'analysis'}, str(tmp_path), 'Capital', 'Capital')
     assert len(list(tmp_path.glob('*.json'))) == 1
     assert len(list(tmp_path.glob('*.md'))) == 1
+    payload = json.loads(next(tmp_path.glob('*.json')).read_text())
+    assert payload['report_status'] == {'pdf': 'failed', 'error_type': 'RuntimeError'}
 
 
 def test_all_failed_pipeline_keeps_diagnostic_artifacts(tmp_path):
@@ -129,3 +131,14 @@ def test_failed_atomic_replace_keeps_original_and_cleans_temp(monkeypatch, tmp_p
         atomic_write(target, 'new')
     assert target.read_text() == 'previous'
     assert list(tmp_path.iterdir()) == [target]
+
+
+def test_single_topic_snapshot_is_isolated_and_does_not_copy_other_topics():
+    tracker = make_tracker()
+    tracker.process_topic('Fund')
+    tracker.topic_records['Other'] = {'raw_evidence': 'unrelated evidence'}
+    record = tracker.snapshot_record('Fund')
+    assert record['raw_evidence'] and 'unrelated' not in json.dumps(record)
+    record['queries'].clear()
+    assert tracker.snapshot_record('Fund')['queries'] == ['Fund capital']
+    assert tracker.snapshot_record('Missing') == {}

@@ -216,7 +216,8 @@ def test_serper_timelimit_and_proxy(monkeypatch, config):
     found = SearchService(config)._try_serper('query', 5, 'd')
     assert post.call_args.kwargs['json']['tbs'] == 'qdr:d'
     assert post.call_args.kwargs['proxies']['https'] == config.SEARCH_PROXY
-    assert found[0]['date'] == '1 day ago'
+    assert found[0]['date'] == (date.today() - timedelta(days=1)).isoformat()
+    assert found[0]['_date_original'] == '1 day ago'
 
 
 @pytest.mark.parametrize('time_range', ['d', 'w', 'm', 'y', None])
@@ -558,3 +559,44 @@ def test_http_backends_fail_once_with_safe_logs(monkeypatch, config, capsys, bac
     assert getattr(SearchService(config), f'_try_{backend}')('fund', 3, 'w') is None
     request.assert_called_once()
     assert 'secret-must-not-be-logged' not in capsys.readouterr().out
+
+
+def test_relative_provider_date_is_frozen_before_cache_or_archive(config, monkeypatch):
+    from datetime import datetime
+    class RetrievalTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 30, 12)
+    monkeypatch.setattr('core.search_service.datetime', RetrievalTime)
+    service = SearchService(config)
+    records = service._process_results([item(date='昨天')])
+    assert records[0]['date'] == '2026-09-29'
+    assert records[0]['_date_original'] == '昨天'
+    class ReplayTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 30, 12)
+    monkeypatch.setattr('core.search_service.datetime', ReplayTime)
+    replayed = service._process_results(records)
+    assert replayed[0]['date'] == '2026-09-29'
+    text = SearchAggregator(service)._format_results(replayed, True)
+    assert '时间: 2026-09-29' in text
+    assert '原渠道返回 昨天' in text and '非事件发生时间' in text
+
+
+def test_tavily_pushes_domain_policy_and_rechecks_returned_scope(monkeypatch, config):
+    config.TAVILY_API_KEY = 'fake'
+    config.SOURCE_ALLOWLIST = {'example.com'}
+    config.SOURCE_DENYLIST = {'blocked.example.com', 'ads.'}
+    response = Mock()
+    response.json.return_value = {'results': [
+        {'title': 'Allowed', 'url': 'https://example.com/a', 'content': 'funding'},
+        {'title': 'Blocked', 'url': 'https://blocked.example.com/a', 'content': 'funding'},
+        {'title': 'Outside', 'url': 'https://outside.example/a', 'content': 'funding'},
+    ]}
+    post = Mock(return_value=response)
+    monkeypatch.setattr('core.search_service.requests.post', post)
+    assert [r['href'] for r in SearchService(config)._try_tavily('q', 5, 'w')] == ['https://example.com/a']
+    payload = post.call_args.kwargs['json']
+    assert payload['include_domains'] == ['example.com']
+    assert payload['exclude_domains'] == ['blocked.example.com']

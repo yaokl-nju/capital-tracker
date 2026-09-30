@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "集中持仓与中国资本观察",
+  "description": "按市场保存机构名单；先用 --dry-run 查看预算，再运行。",
+  "tracker": "all",
+  "topics": {
+    "investment": ["Himalaya Capital", "Coatue Management", "Lone Pine Capital"],
+    "investment_china": ["高毅资产", "HHLR Advisors", "E Fund"]
+  },
+  "options": {
+    "max_workers": 2,
+    "max_queries": 5,
+    "max_results": 4,
+    "timelimit": "w",
+    "sec_holdings": true
+  }
+}

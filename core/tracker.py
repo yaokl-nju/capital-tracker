@@ -11,8 +11,11 @@ from copy import deepcopy
 from datetime import datetime, timezone
 
 from core.llm_service import LLMService
-from core.search_service import SearchAggregator, canonical_url
+from core.search_service import SearchAggregator
 from config.settings import Config
+from core.diagnostics import capture_diagnostics, observe_stage, record_event
+from core.evidence_quality import evidence_index, evidence_quality
+from core.citations import validate_citations
 
 
 class QueryGenerator(ABC):
@@ -78,9 +81,15 @@ class Tracker:
         with self._records_lock:
             return deepcopy(self.topic_records)
 
-    def _record_topic(self, topic, queries, raw_data, summary, started, error_type=''):
+    def snapshot_record(self, topic):
+        """Copy one completed topic for incremental saving without copying the batch."""
+        with self._records_lock:
+            return deepcopy(self.topic_records.get(topic, {}))
+
+    def _record_topic(self, topic, queries, raw_data, summary, started, error_type='', diagnostics=None):
         status = ('error' if error_type else 'no_evidence' if not raw_data else
-                  'evidence_only' if summary.startswith('### 自动分析不可用') else 'analyzed')
+                  'evidence_only' if self.config.EVIDENCE_ONLY or summary.startswith('### 自动分析不可用') else 'analyzed')
+        index = evidence_index(raw_data)
         with self._records_lock:
             self.topic_records[topic] = {
                 'completed_at': datetime.now(timezone.utc).isoformat(),
@@ -89,6 +98,9 @@ class Tracker:
                 'error_type': error_type,
                 'queries': list(queries),
                 'raw_evidence': raw_data,
+                'diagnostics': diagnostics or {'events': [], 'dropped_events': 0},
+                'evidence_index': index,
+                'evidence_quality': evidence_quality(index),
             }
 
     def generate_queries(self, topic: str) -> List[str]:
@@ -101,6 +113,9 @@ class Tracker:
         Returns:
             List of search query strings
         """
+        if self.config.EVIDENCE_ONLY:
+            record_event('model', outcome='disabled', stage='query_generation')
+            return self.query_generator.get_fallback_queries(topic)[:self.config.MAX_QUERIES]
         prompt = self.query_generator.get_prompt(topic)
 
         for idx in range(self.config.MAX_TRIALS):
@@ -168,6 +183,9 @@ class Tracker:
         """
         if not raw_data:
             return "### 当前检索未找到可核实的近期资本动态"
+        if self.config.EVIDENCE_ONLY:
+            record_event('model', outcome='disabled', stage='analysis')
+            return self._evidence_fallback(raw_data, intentional=True)
 
         print(f"🧠 [{topic}] 深度分析中...")
 
@@ -178,19 +196,17 @@ class Tracker:
             return self._evidence_fallback(raw_data)
         # Models sometimes wrap a source citation in inline code, breaking PDF links.
         result = re.sub(r'`(\[[^\]\n]*\]\(https?://[^\s)]+\))`', r'\1', result)
-        allowed = {canonical_url(url) for url in re.findall(r'^链接: (https?://[^\s]+)', raw_data, re.M)}
-        cited = re.findall(r'\[[^\]]*\]\(([^\s]+)\)', result)
-        invalid = {url for url in cited if not canonical_url(url) or canonical_url(url) not in allowed}
-        if invalid:
+        allowed = re.findall(r'^链接: (https?://[^\s]+)', raw_data, re.M)
+        result, audit = validate_citations(result, allowed)
+        record_event('citations', outcome='checked', **audit)
+        if audit['unverified_count']:
             print(f'⚠️ [{topic}] 个别来源链接未匹配，标注后保留分析')
-            result = re.sub(r'\[([^\]]*)\]\(([^\s]+)\)',
-                            lambda match: (match[1] + '（来源链接未核实）'
-                                           if match[2] in invalid else match[0]), result)
         return result
 
     @staticmethod
-    def _evidence_fallback(raw_data):
-        return ("### 自动分析不可用，保留原始检索证据\n\n"
+    def _evidence_fallback(raw_data, intentional=False):
+        heading = ('### 仅检索证据（已关闭自动分析）' if intentional else '### 自动分析不可用，保留原始检索证据')
+        return (heading + '\n\n' +
                 "以下为搜索摘要，未完成分析与交叉核实：\n\n" +
                 re.sub(r'链接: (https?://[^\s]+)', r'链接: [原始来源](\1)', raw_data))
 
@@ -206,17 +222,21 @@ class Tracker:
         """
         started = time.monotonic()
         queries, raw_data, summary, error_type = [], '', '', ''
-        try:
-            queries = self.generate_queries(topic)
-            raw_data = self.perform_search(topic, queries)
-            summary = self.summarize(topic, raw_data)
-            return topic, summary
-        except Exception as e:
-            error_type = type(e).__name__
-            summary = f"数据处理失败: {error_type}"
-            return topic, summary
-        finally:
-            self._record_topic(topic, queries, raw_data, summary, started, error_type)
+        with capture_diagnostics() as diagnostics:
+            try:
+                with observe_stage('query_generation'):
+                    queries = self.generate_queries(topic)
+                with observe_stage('search'):
+                    raw_data = self.perform_search(topic, queries)
+                with observe_stage('analysis'):
+                    summary = self.summarize(topic, raw_data)
+                return topic, summary
+            except Exception as e:
+                error_type = type(e).__name__
+                summary = f"数据处理失败: {error_type}"
+                return topic, summary
+            finally:
+                self._record_topic(topic, queries, raw_data, summary, started, error_type, diagnostics.snapshot())
     async def perform_search_async(self, topic: str, queries: List[str]) -> str:
         return await self.search_aggregator.aggregate_async(
             queries, timelimit=self.config.NEWS_TIMELIMIT)
@@ -225,17 +245,21 @@ class Tracker:
         """Overlap blocking SDK calls without changing their existing implementations."""
         started = time.monotonic()
         queries, raw_data, summary, error_type = [], '', '', ''
-        try:
-            queries = await asyncio.to_thread(self.generate_queries, topic)
-            raw_data = await self.perform_search_async(topic, queries)
-            summary = await asyncio.to_thread(self.summarize, topic, raw_data)
-            return topic, summary
-        except asyncio.CancelledError:
-            error_type = 'CancelledError'
-            raise
-        except Exception as exc:
-            error_type = type(exc).__name__
-            summary = f"数据处理失败: {error_type}"
-            return topic, summary
-        finally:
-            self._record_topic(topic, queries, raw_data, summary, started, error_type)
+        with capture_diagnostics() as diagnostics:
+            try:
+                with observe_stage('query_generation'):
+                    queries = await asyncio.to_thread(self.generate_queries, topic)
+                with observe_stage('search'):
+                    raw_data = await self.perform_search_async(topic, queries)
+                with observe_stage('analysis'):
+                    summary = await asyncio.to_thread(self.summarize, topic, raw_data)
+                return topic, summary
+            except asyncio.CancelledError:
+                error_type = 'CancelledError'
+                raise
+            except Exception as exc:
+                error_type = type(exc).__name__
+                summary = f"数据处理失败: {error_type}"
+                return topic, summary
+            finally:
+                self._record_topic(topic, queries, raw_data, summary, started, error_type, diagnostics.snapshot())

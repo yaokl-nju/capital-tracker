@@ -144,21 +144,11 @@ def test_email_context_cleanup_and_attachment(monkeypatch, tmp_path):
 def test_report_titles_are_html_escaped(monkeypatch, tmp_path):
     # Render interception avoids requiring native PDF libraries for this unit test.
     from core.report_generator import ReportGenerator
-    from types import ModuleType
-    import sys
     captured = {}
-    class FakeHTML:
-        def __init__(self, string, **kwargs):
-            captured['html'] = string
-        def write_pdf(self, target, **kwargs):
-            Path(target).write_bytes(b'%PDF-mock')
-    module = ModuleType('weasyprint')
-    module.HTML = FakeHTML
-    module.CSS = lambda **kwargs: None
-    fonts = ModuleType('weasyprint.text.fonts')
-    fonts.FontConfiguration = lambda: None
-    monkeypatch.setitem(sys.modules, 'weasyprint', module)
-    monkeypatch.setitem(sys.modules, 'weasyprint.text.fonts', fonts)
+    def render(self, html, target):
+        captured['html'] = html
+        Path(target).write_bytes(b'%PDF-mock')
+    monkeypatch.setattr(ReportGenerator, '_render_html', render)
     ReportGenerator(str(tmp_path / 'out.pdf'), '<script>title</script>').create_pdf({'A & B': 'Report'})
     assert '&lt;script&gt;title' in captured['html']
     assert 'A &amp; B' in captured['html']
@@ -238,3 +228,36 @@ def test_query_and_summary_windows_follow_config(timelimit, days):
     assert start in generator_prompt and start in summary_prompt
     assert '最多采用2条' in generator_prompt
     assert '两端日期包含' in summary_prompt
+
+
+def test_daily_brief_preserves_evidence_rules_and_does_not_change_full_mode():
+    full_config = Config()
+    full = InvestmentSummarizer(full_config).get_prompt('Himalaya Capital', 'raw evidence')
+    assert '本次输出为每日速览' not in full
+    brief_config = Config()
+    brief_config.REPORT_STYLE = 'brief'
+    brief = InvestmentSummarizer(brief_config).get_prompt('Himalaya Capital', 'raw evidence')
+    assert '本次输出为每日速览' in brief and '最多 5 行、4 列' in brief
+    for rule in ('第三方来源转述', '时效未核实', '历史快照', '相邻季度基线', '不填充虚构事实'):
+        assert rule in brief
+    assert '13F 的“持仓比例”仅为本申报表市值占比' in brief
+    assert 'raw evidence' in brief and full_config.REPORT_STYLE == 'full'
+
+
+def test_fallback_chinese_identity_hints_do_not_become_one_exact_phrase():
+    queries = InvestmentQueryGenerator().get_fallback_queries('Himalaya Capital')
+    assert queries[0].startswith('"喜马拉雅资本" 李录 ')
+    assert '"喜马拉雅资本 李录"' not in ' '.join(queries)
+    cpe = InvestmentQueryGenerator('china').get_fallback_queries('CPE')
+    assert cpe[0].startswith('"中信产业基金" CPE源峰 ')
+    unknown = InvestmentQueryGenerator().get_fallback_queries('Unknown Capital')
+    assert unknown[0].startswith('"Unknown Capital" ')
+
+
+@pytest.mark.parametrize('limit,per_dimension', [(1, 1), (5, 1), (12, 3), (50, 8)])
+def test_query_generation_prompt_scales_to_query_budget(limit, per_dimension):
+    config = Config()
+    config.MAX_QUERIES = limit
+    prompt = InvestmentQueryGenerator(config=config).get_prompt('Fund')
+    assert f'每个维度最多 {per_dimension} 个' in prompt
+    assert f'实际搜索最多采用{limit}条' in prompt

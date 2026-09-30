@@ -80,6 +80,7 @@ def get_all_fund_names() -> list[str]:
 
 # Search aliases are not SEC legal-entity mappings. Preserve that distinction.
 SEARCH_ALIASES = {
+    'Himalaya Capital': '喜马拉雅资本 李录',
     'Perseverance Asset Management': '高毅资产',
     'Greenwoods Asset Management': '景林资产',
     'Springs Capital': '淡水泉',
@@ -100,6 +101,16 @@ SEARCH_ALIASES = {
     'Temasek': '淡马锡',
     'GIC': '新加坡政府投资公司 GIC',
 }
+
+
+def get_identity_context(topic: str) -> str:
+    """Verified identity hints for observed name collisions, not guessed CIK mappings."""
+    if any(name.casefold() == 'himalaya capital' for name in get_search_names(topic)):
+        # Official https://www.himcap.com/ identifies Li Lu, 1997, Seattle.
+        return ('本研究对象为李录（Li Lu）1997年创立、位于美国西雅图的 Himalaya Capital，'
+                '官网 himcap.com（旧域名 himalayacapital.com）。'
+                '须区分同名印度机构；不能将不同主体的投资组合或介绍合并。')
+    return ''
 
 
 def get_search_names(topic: str) -> list[str]:
